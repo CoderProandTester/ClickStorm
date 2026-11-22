@@ -160,6 +160,11 @@ Settings are written atomically. An older settings file is migrated on load
 (version 2 moves the default start hotkey to `F5` and caps the click target at
 25,000).
 
+## Contributing
+
+Contribution setup, engine rules, testing checklist and release steps are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

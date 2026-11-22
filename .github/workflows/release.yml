@@ -11,10 +11,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: windows-installers-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -49,12 +54,34 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           Write-Host "Building ClickStorm $version for ${{ matrix.arch }}"
 
+      - name: Check tag matches app version
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}"
+            $expected = "v${{ steps.version.outputs.version }}"
+            if ($tag -ne $expected) {
+              throw "Tag '$tag' does not match the app version '$expected'. Bump clickstorm/__init__.py or retag."
+            }
+            Write-Host "Tag $tag matches the app version"
+          }
+
       - name: Build the app
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check --upgrade pip
           python -m pip install --disable-pip-version-check "pyinstaller>=6.10,<7"
           python -m PyInstaller --noconfirm --clean AutoClicker.spec
+
+      - name: Verify exe architecture
+        shell: pwsh
+        run: |
+          $machine = python -c "import struct; f = open('dist/ClickStorm.exe','rb'); d = f.read(1024); e = struct.unpack_from('<I', d, 0x3c)[0]; f.seek(e + 4); print(hex(struct.unpack('<H', f.read(2))[0]))"
+          $expected = @{ x64 = '0x8664'; x86 = '0x14c'; arm64 = '0xaa64' }['${{ matrix.arch }}']
+          if ($machine.Trim().ToLower() -ne $expected) {
+            throw "Built exe architecture $machine does not match ${{ matrix.arch }} ($expected)"
+          }
+          Write-Host "Verified ${{ matrix.arch }} exe ($machine)"
 
       - name: Install Inno Setup
         shell: pwsh
@@ -75,6 +102,9 @@ jobs:
         run: |
           & "$env:ISCC" "/DMyAppArch=${{ matrix.arch }}" "/DMyAppVersion=${{ steps.version.outputs.version }}" "installer\ClickStorm.iss"
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+          $setup = "release\ClickStorm-Setup-${{ steps.version.outputs.version }}-${{ matrix.arch }}.exe"
+          if (-not (Test-Path $setup)) { throw "Installer was not produced: $setup" }
+          Write-Host "Built $setup"
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
@@ -88,6 +118,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
