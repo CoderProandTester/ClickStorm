@@ -89,7 +89,9 @@ the minimum OS to Windows 10 and restricts itself to the matching architecture.
 ## Releases (GitHub Actions)
 
 `.github/workflows/release.yml` builds all three installers and publishes them
-to a GitHub Release. Push a version tag:
+to a GitHub Release. Every push to `main` also builds the three installers as
+workflow artifacts (no release is created), which is the easiest way to confirm
+the action is working. Push a version tag:
 
 ```bat
 git tag v2.0.0

@@ -4,6 +4,8 @@ name: Windows installers
 # to a GitHub Release. Run the workflow manually to get build artifacts only.
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
