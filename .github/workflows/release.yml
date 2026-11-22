@@ -1,0 +1,105 @@
+name: Windows installers
+
+# Builds one installer per Windows architecture and (for tags) publishes them
+# to a GitHub Release. Run the workflow manually to get build artifacts only.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x64 and x86 share the x64 runner; the x86 job uses 32-bit Python.
+          - arch: x64
+            os: windows-latest
+            python-arch: x64
+          - arch: x86
+            os: windows-latest
+            python-arch: x86
+          # Native ARM64 build on GitHub's Windows 11 ARM runner.
+          - arch: arm64
+            os: windows-11-arm
+            python-arch: arm64
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          architecture: ${{ matrix.python-arch }}
+
+      - name: Read app version
+        id: version
+        shell: pwsh
+        run: |
+          $version = python -c "import clickstorm; print(clickstorm.__version__)"
+          if (-not $version) { throw "Could not read the ClickStorm version" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Building ClickStorm $version for ${{ matrix.arch }}"
+
+      - name: Build the app
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --upgrade pip
+          python -m pip install --disable-pip-version-check "pyinstaller>=6.10,<7"
+          python -m PyInstaller --noconfirm --clean AutoClicker.spec
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "innosetup.exe"
+          $target = Join-Path $env:RUNNER_TEMP "InnoSetup"
+          # Official compiler build hosted on the Inno Setup GitHub releases;
+          # the jrsoftware.org file URLs are not reachable from CI runners.
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
+          curl.exe -fsSL $url -o $installer
+          Start-Process $installer -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER", "/DIR=`"$target`"" -Wait
+          $iscc = Join-Path $target "ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler was not installed" }
+          "ISCC=$iscc" >> $env:GITHUB_ENV
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          & "$env:ISCC" "/DMyAppArch=${{ matrix.arch }}" "/DMyAppVersion=${{ steps.version.outputs.version }}" "installer\ClickStorm.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClickStorm-${{ matrix.arch }}
+          path: release/*.exe
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true
