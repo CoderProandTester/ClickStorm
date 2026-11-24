@@ -112,7 +112,7 @@ class UpdateDialog(tk.Toplevel):
             bd=0,
             highlightthickness=0,
             activestyle="none",
-            font=theme.font(10, "mono"),
+            font=theme.font(10, "normal", "mono"),
             exportselection=False,
         )
         self.listbox.pack(fill="both", expand=True, padx=8, pady=8)
@@ -258,6 +258,10 @@ class UpdateDialog(tk.Toplevel):
                 self._set_busy(False)
             elif kind == "downloaded":
                 self._launch(payload)
+        # Installing closes this window and then the app, so the widget can be
+        # gone by now; rescheduling on a destroyed window raises TclError.
+        if self._closed or not self.winfo_exists():
+            return
         self._poll_job = self.after(self.POLL_MS, self._poll)
 
     # ------------------------------------------------------------------

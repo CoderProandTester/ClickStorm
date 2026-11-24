@@ -1,7 +1,9 @@
 name: Windows installers
 
-# Builds one installer per Windows architecture and (for tags) publishes them
-# to a GitHub Release. Run the workflow manually to get build artifacts only.
+# Builds one installer per Windows architecture and publishes them to a GitHub
+# Release for a version tag push, or for a manual run with "publish" enabled.
+# The manual path needs no local git credentials: the workflow creates the
+# v<version> tag itself from clickstorm/__init__.py.
 on:
   push:
     branches:
@@ -9,19 +11,29 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish a GitHub Release for the version in clickstorm/__init__.py"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
   group: windows-installers-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push on a branch may cancel an older build, but never a release
+  # run: cancelling one mid-publish leaves a half-populated release.
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref_type == 'branch' }}
 
 jobs:
   build:
     name: ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    # The ARM64 runner is limited availability; a failed ARM64 leg must not
+    # keep the x64/x86 installers from being published.
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
@@ -30,13 +42,16 @@ jobs:
           - arch: x64
             os: windows-latest
             python-arch: x64
+            experimental: false
           - arch: x86
             os: windows-latest
             python-arch: x86
+            experimental: false
           # Native ARM64 build on GitHub's Windows 11 ARM runner.
           - arch: arm64
             os: windows-11-arm
             python-arch: arm64
+            experimental: true
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -117,22 +132,57 @@ jobs:
 
   release:
     name: Publish release
-    if: startsWith(github.ref, 'refs/tags/')
     needs: build
+    # Publish for a v* tag push, or when the workflow is started manually with
+    # "publish" enabled. Always runs even when one build leg failed (that is
+    # why the verify step below insists on at least one installer).
+    if: |
+      always() && !cancelled() &&
+      (startsWith(github.ref, 'refs/tags/') ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write
     steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Read app version
+        id: version
+        run: |
+          version=$(python3 -c "import clickstorm; print(clickstorm.__version__)")
+          if [ -z "$version" ]; then
+            echo "Could not read the ClickStorm version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Publishing v$version"
+
       - name: Download installers
         uses: actions/download-artifact@v4
         with:
           path: release
           merge-multiple: true
 
+      - name: Verify installers
+        run: |
+          count=$(find release -maxdepth 1 -name '*.exe' | wc -l)
+          echo "Found $count installer(s):"
+          ls -l release
+          if [ "$count" -eq 0 ]; then
+            echo "No installer was built, so there is nothing to publish." >&2
+            exit 1
+          fi
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          # Creating the tag here is what lets a manual run publish without
+          # anyone pushing a tag from their own machine.
+          tag_name: v${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: v${{ steps.version.outputs.version }}
           files: release/*.exe
           generate_release_notes: true
           fail_on_unmatched_files: true

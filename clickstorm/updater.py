@@ -258,6 +258,11 @@ def launch_installer(path: Path) -> None:
     if not installer.lower().endswith(".exe") or not os.path.isfile(installer):
         raise UpdateError("The installer file is missing.")
     try:
-        subprocess.Popen([installer, "/NORESTART"], close_fds=True)
+        # /CLOSEAPPLICATIONS lets Inno close ClickStorm itself if it is still
+        # shutting down, instead of stopping on a "file in use" prompt.
+        subprocess.Popen(
+            [installer, "/NORESTART", "/CLOSEAPPLICATIONS", "/SP-"],
+            close_fds=True,
+        )
     except Exception as exc:
         raise UpdateError(f"Could not start the installer: {exc}") from exc

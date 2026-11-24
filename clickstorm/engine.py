@@ -450,14 +450,16 @@ class ClickEngine:
                     continue
 
                 bank -= due
-                self._clicks_requested += due
                 if target_clicks is not None:
                     left = target_clicks - self._clicks_sent
                     if due > left:
+                        # The run ends on this batch: the surplus never reaches
+                        # the target and must not be reported as requested.
                         due = left
                     if due <= 0:
                         reason = "target"
                         break
+                self._clicks_requested += due
 
                 if config.position_mode == "fixed":
                     winapi.keep_cursor_locked(fixed_x, fixed_y)
@@ -556,6 +558,10 @@ class ClickEngine:
                     failures = 0
                     if detail:
                         self._last_error = detail
+                    elif remaining == 0:
+                        # A clean batch clears a message left by an earlier
+                        # rejection so the UI never shows a stale error.
+                        self._last_error = ""
                 else:
                     failures += 1
                     if detail:

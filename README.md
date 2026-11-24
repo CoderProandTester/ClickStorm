@@ -96,18 +96,24 @@ the minimum OS to Windows 10 and restricts itself to the matching architecture.
 `.github/workflows/release.yml` builds all three installers and publishes them
 to a GitHub Release. Every push to `main` also builds the three installers as
 workflow artifacts (no release is created), which is the easiest way to confirm
-the action is working. Push a version tag:
+the action is working. The publish job runs **only** for a version tag or for a
+manual run with **publish** enabled, so a plain push to `main` never creates a
+release. Two ways to publish:
 
 ```bat
 git tag v3.0.0
 git push origin v3.0.0
 ```
 
+or, with no local git credentials, open **Actions → Windows installers → Run
+workflow**, tick **publish** and run it. The workflow then creates the
+`v<version>` tag itself and attaches the installers.
+
 The workflow reads the version from `clickstorm/__init__.py`, so bump it before
-tagging. x64 and x86 build on `windows-latest` (x86 uses 32-bit Python); ARM64
-builds natively on the `windows-11-arm` runner. Running the workflow manually
-produces the same installers as downloadable build artifacts without creating a
-release.
+publishing. x64 and x86 build on `windows-latest` (x86 uses 32-bit Python);
+ARM64 builds natively on the `windows-11-arm` runner and is allowed to fail
+without holding back the x64/x86 release. A manual run without **publish**
+produces the same installers as downloadable build artifacts only.
 
 ## Updates
 

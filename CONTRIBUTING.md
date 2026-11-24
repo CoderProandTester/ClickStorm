@@ -156,8 +156,10 @@ restricts itself to Windows 10+ and the matching architecture.
 
 Each job verifies the built exe is the requested architecture, compiles the
 matching installer, and uploads it as an artifact. Pushing a `v*` tag publishes
-the three installers to a GitHub Release. The workflow also fails if the tag
-does not match `clickstorm/__init__.py`.
+the three installers to a GitHub Release, and so does a manual run with
+**publish** enabled (that run creates the tag). The workflow also fails if the
+tag does not match `clickstorm/__init__.py`. The ARM64 leg is allowed to fail so
+a runner outage cannot block the x64/x86 release.
 
 Release procedure:
 
@@ -170,6 +172,9 @@ Release procedure:
    git tag v3.0.0
    git push origin v3.0.0
    ```
+
+   Without local git credentials, run the workflow from the Actions UI with
+   **publish** enabled instead; it creates the tag for you.
 
 5. Confirm all three installers are attached to the release.
 
