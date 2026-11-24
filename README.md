@@ -47,9 +47,13 @@ with Start-menu shortcuts and an entry in Settings → Apps.
   25 clicks are released in every 1 ms slot (1,000 slots per second) and
   500 CPS is one click every 2 ms. Credit is tracked against the real clock,
   so fractional rates such as 1,234 CPS stay exact.
-- Small adaptive `SendInput` calls: one click per call at first, widening to
-  16 clicks only while calls stay far cheaper than a slot, because wide arrays
-  are measurably slower once an app throttles input.
+- Small adaptive `SendInput` calls: one click per call at first, widening only
+  while calls stay far cheaper than a slot, because wide arrays are measurably
+  slower once an app throttles input.
+- Two delivery modes: **SendInput**, which every app and game accepts and which
+  Windows caps at roughly 6,000-7,000 CPS here, and **direct window messages**,
+  which skip the system input queue and measured ~25,000 CPS for apps that act
+  on posted clicks.
 - Live stats: actual CPS, peak CPS, rate history, progress, ETA, batches,
   input events and failed events.
 - **UPDATES** button: checks the latest GitHub release, lists the installers it
@@ -191,35 +195,44 @@ limit expires, or when you press stop. In unlimited mode only stop ends a run.
 
 ### Measured speed
 
-Windows serialises injected input through a single system input thread, and the
-receiving application consumes it on its own message loop, so the real ceiling
-belongs to the target rather than to ClickStorm. Measured with ClickStorm
-4.0.0 clicking into a window that counted every click it received:
+Windows serialises injected `SendInput` through a single system input thread,
+and the receiving application consumes it on its own message loop, so the real
+ceiling belongs to the target rather than to ClickStorm. Measured with
+ClickStorm 4.0.1 clicking into a window that counted every click it received:
 
-| Target | Delivered |
-| --- | --- |
-| 500 CPS | 499 CPS |
-| 1,000 CPS | 999 CPS |
-| 5,000 CPS | 4,960 CPS |
-| 25,000 CPS | 5,708 CPS |
+| Target | SendInput delivered | Direct delivered |
+| --- | --- | --- |
+| 1,000 CPS | 999 CPS | - |
+| 5,000 CPS | 4,981 CPS | - |
+| 10,000 CPS | 6,194 CPS | 9,988 CPS |
+| 20,000 CPS | 5,820 CPS | 19,962 CPS |
+| 25,000 CPS | 6,052 CPS | 24,945 CPS |
+
+`SendInput` - what games and normal apps expect - tops out at roughly
+**6,000-7,000 CPS** on this machine. Above that Windows still accepts the
+events, but the target's message loop cannot consume them, which is why a
+25,000 CPS SendInput target reads around 6,000 CPS on the live gauge. Direct
+delivery skips the system input queue by posting
+`WM_LBUTTONDOWN`/`WM_LBUTTONUP` straight to the window and reaches
+**~25,000 CPS**, but only apps that act on posted messages respond to it (many
+games ignore them and only move the cursor, so SendInput stays the default).
 
 Version 4.0.0 replaced the wide catch-up bursts of earlier builds (16 clicks
-per call, growing to 64) with small adaptive calls. On the same machine, a
+per call, growing to 64) with small adaptive calls: on the same machine, a
 5,000 CPS target delivered about **166 CPS** before that change and about
-**4,950 CPS** after it, and a 25,000 CPS target went from about 214 CPS to
-about 5,700 CPS.
+**4,980 CPS** after it.
 
 Above the ceiling, `25,000` behaves as a "run as fast as this app allows"
-setting: the live CPS readout shows what actually reached Windows. Games and
-apps that throttle input usually register **500-2,000 CPS** more reliably than
-an extreme setting.
+setting: the live CPS readout shows what actually reached the target. Games
+and apps that throttle input usually register **500-2,000 CPS** more reliably
+than an extreme setting.
 
 ## Settings and files
 
 | Path | Purpose |
 | --- | --- |
 | `%APPDATA%\ClickStorm\settings.json` | Saved preferences, lifetime clicks, window geometry |
-| `%APPDATA%\ClickStorm\error.log` | Startup and UI error details |
+| `%APPDATA%\ClickStorm\error.log` | Startup, UI and update error details |
 
 Settings are written atomically. An older settings file is migrated on load
 (version 2 moves the default start hotkey to `F5` and caps the click target at
@@ -261,5 +274,14 @@ installer/ClickStorm.iss Inno Setup installer recipe
 - **Stopping feels delayed at extreme rates.** Stop is checked on every 1 ms
   slot and every `SendInput` call, but a backed-up input queue can still take
   a moment to drain.
+- **25,000 CPS reads around 6,000 CPS actual.** That is the `SendInput`
+  ceiling: Windows delivers roughly 6,000-7,000 injected clicks per second
+  here no matter how high the target is. Switch **Settings → Delivery** to
+  **Direct window messages** when the target accepts posted clicks; that path
+  measured ~25,000 CPS.
+- **The update reported a missing module.** 4.0.1 starts the downloaded
+  installer without inheriting the windowed app's absent std handles (that
+  call was the failure), and every update failure is now written to
+  `%APPDATA%\ClickStorm\error.log` with its exact message.
 - **Windows SmartScreen warns about the installer.** The build is not code
   signed, so choose "More info" → "Run anyway".

@@ -252,6 +252,7 @@ class UpdateDialog(tk.Toplevel):
                 self.progress_var.set(str(payload))
             elif kind == "download_error":
                 self.progress_var.set("")
+                updater.log_error("Update download failed", str(payload))
                 messagebox.showerror(
                     "Update download failed", str(payload), parent=self
                 )
@@ -310,6 +311,7 @@ class UpdateDialog(tk.Toplevel):
 
     def _show_error(self, message: str) -> None:
         self._set_busy(False)
+        updater.log_error("Update check failed", message)
         self.status_var.set(f"Installed version: v{APP_VERSION}")
         self.detail_var.set(str(message))
         self._install_button.set_enabled(False)
@@ -358,6 +360,7 @@ class UpdateDialog(tk.Toplevel):
         except Exception as exc:
             self._set_busy(False)
             self.progress_var.set("")
+            updater.log_error("Launching the installer failed", str(exc))
             messagebox.showerror(
                 "Could not start the installer", str(exc), parent=self
             )

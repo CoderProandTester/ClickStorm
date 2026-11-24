@@ -64,10 +64,15 @@ TICK_SECONDS = 0.001
 MAX_BACKLOG_MS = 20.0
 # Reusable INPUT arrays are sized for this many clicks and never reallocated.
 # Small batches are faster than wide ones once the receiving app throttles
-# input, so the array covers the growth ceiling only.
-MAX_CHUNK_CLICKS = 16
+# input, so the array covers the growth ceiling only. The batch starts at the
+# number of clicks one 1 ms slot carries (25 at 25,000 CPS), which is one
+# SendInput call per slot instead of 25 queue-blocking calls.
+MAX_CHUNK_CLICKS = 32
 MIN_CHUNK_CLICKS = 1
 INITIAL_CHUNK_CLICKS = 1
+# Posted window messages never wait for the system input queue, so direct
+# delivery can carry a much wider batch per call.
+DIRECT_CHUNK_CLICKS = 256
 # A call slower than this is a sign the target is throttling input; widen the
 # batch only while a call stays comfortably inside one millisecond slot.
 CHUNK_SLOW_SECONDS = 0.0008
@@ -393,7 +398,21 @@ class ClickEngine:
         # a steady stream at the machine's real ceiling instead of stalling.
         backlog_cap = max(1.0, cps_per_ms * MAX_BACKLOG_MS)
         jitter = config.jitter_percent
-        chunk = INITIAL_CHUNK_CLICKS
+        slot_clicks = int(cps_per_ms + 0.5)
+        if click_array is not None:
+            # A SendInput call waits for the target to drain its input queue,
+            # so a wide call is slower than a narrow one: start at a single
+            # click and let the adaptive growth widen it only when that is
+            # actually cheap.
+            chunk_limit = MAX_CHUNK_CLICKS
+            chunk = INITIAL_CHUNK_CLICKS
+        else:
+            # Posted messages skip the input queue, so direct delivery can
+            # start at the clicks one slot carries (25 at 25,000 CPS).
+            chunk_limit = DIRECT_CHUNK_CLICKS
+            chunk = max(
+                INITIAL_CHUNK_CLICKS, min(chunk_limit, max(1, slot_clicks))
+            )
         clean_bursts = 0
         failures = 0
         credit = 0.0
@@ -513,11 +532,7 @@ class ClickEngine:
                                 "No clickable window was found under the cursor."
                             )
                         else:
-                            for _ in range(due):
-                                if self._shutdown or self._stop_requested:
-                                    break
-                                if winapi.post_click(direct_target):
-                                    accepted += 1
+                            accepted = winapi.post_clicks(direct_target, due)
                             if accepted < due:
                                 detail = (
                                     "The target window rejected some posted "
@@ -547,11 +562,8 @@ class ClickEngine:
                         self._last_error = ""
                     if call_seconds < CHUNK_SLOW_SECONDS:
                         clean_bursts += 1
-                        if (
-                            clean_bursts >= 16
-                            and chunk < MAX_CHUNK_CLICKS
-                        ):
-                            chunk = min(MAX_CHUNK_CLICKS, chunk * 2)
+                        if clean_bursts >= 16 and chunk < chunk_limit:
+                            chunk = min(chunk_limit, chunk * 2)
                             clean_bursts = 0
                     else:
                         # The call already takes longer than a slot: widening
