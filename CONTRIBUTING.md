@@ -131,7 +131,7 @@ the spec is what keeps Windows from opening a console window.
 The Inno Setup script takes the app version and target architecture as defines:
 
 ```bat
-iscc /DMyAppArch=x64 /DMyAppVersion=2.0.0 installer\ClickStorm.iss
+iscc /DMyAppArch=x64 /DMyAppVersion=3.0.0 installer\ClickStorm.iss
 ```
 
 `MyAppArch` is `x64`, `x86` (32-bit) or `arm64`. Output:
@@ -167,8 +167,8 @@ Release procedure:
 4. Tag and push the tag:
 
    ```bat
-   git tag v2.1.0
-   git push origin v2.1.0
+   git tag v3.0.0
+   git push origin v3.0.0
    ```
 
 5. Confirm all three installers are attached to the release.

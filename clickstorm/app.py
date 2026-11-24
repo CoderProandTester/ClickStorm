@@ -17,6 +17,7 @@ from . import theme, winapi
 from .engine import ClickEngine, EngineConfig, MAX_CLICKS, MAX_CPS, MIN_CPS
 from .settings import Settings, settings_path
 from .settings_dialog import SettingsDialog
+from .update_dialog import UpdateDialog
 from .theme import COLORS, fmt_clock, fmt_int, fmt_rate
 
 
@@ -116,6 +117,8 @@ class ClickStormApp:
         self.shutdown = False
         self._settings_open = False
         self._settings_dialog = None
+        self._update_open = False
+        self._update_dialog = None
 
         self._countdown_active = False
         self._countdown_end = 0.0
@@ -347,6 +350,20 @@ class ClickStormApp:
             font_size=8,
         )
         self.settings_button.pack(side="right", padx=(10, 0))
+
+        self.update_button = theme.PillButton(
+            right,
+            text="UPDATES",
+            command=self.open_updates,
+            width=100,
+            height=32,
+            bg=COLORS["bg"],
+            fill=COLORS["card2"],
+            hover=COLORS["card3"],
+            fg=COLORS["accent"],
+            font_size=8,
+        )
+        self.update_button.pack(side="right", padx=(10, 0))
 
         self.hotkey_header_label = theme.make_label(
             right,
@@ -1746,8 +1763,14 @@ class ClickStormApp:
             self.footer_title_var.set(
                 f"Clicking - {fmt_rate(display_cps)} CPS actual"
             )
+            caught_up = (
+                f"  \u00b7  {stats.catchup_clicks:,} caught up"
+                if stats.catchup_clicks
+                else ""
+            )
             self.footer_sub_var.set(
                 f"{self._run_subtitle()}  \u00b7  {fmt_int(stats.clicks_sent)} clicks"
+                + caught_up
             )
 
     def _update_idle_display(self) -> None:
@@ -1903,6 +1926,40 @@ class ClickStormApp:
         self.settings.save()
         if not self._run_active and not self._countdown_active:
             self._update_stats_display(self.engine.get_stats(), final=True)
+
+    # ------------------------------------------------------------------
+    # Updates
+    # ------------------------------------------------------------------
+
+    def open_updates(self) -> None:
+        if self._update_open and self._update_dialog is not None:
+            try:
+                self._update_dialog.lift()
+                self._update_dialog.focus_force()
+            except Exception:
+                pass
+            return
+
+        self._update_open = True
+        dialog = UpdateDialog(self.root, on_install=self.close_for_update)
+        self._update_dialog = dialog
+        dialog.bind(
+            "<Destroy>",
+            lambda event: self._update_destroyed(event.widget, dialog),
+            add="+",
+        )
+
+    def _update_destroyed(self, widget, dialog) -> None:
+        if widget is dialog:
+            self._update_open = False
+            self._update_dialog = None
+
+    def close_for_update(self) -> None:
+        """Close ClickStorm so a freshly downloaded installer can run."""
+        try:
+            self.close()
+        except Exception:
+            _log_exception("Closing for an update")
 
     # ------------------------------------------------------------------
     # Close

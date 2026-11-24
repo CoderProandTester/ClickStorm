@@ -43,8 +43,13 @@ with Start-menu shortcuts and an entry in Settings → Apps.
 - Follow-cursor clicking or a fixed coordinate returned to on every burst.
 - Optional timing jitter, 0-5 s start delay, always-on-top and
   minimize-on-start.
+- Per-millisecond batching: at 25,000 CPS the engine sends 25 clicks in a
+  single `SendInput` call every 1 ms slot, and any missed slot is paid back as
+  catch-up clicks instead of being lost.
 - Live stats: actual CPS, peak CPS, rate history, progress, ETA, batches,
   input events and failed events.
+- **UPDATES** button: checks the latest GitHub release, lists the installers it
+  offers and installs the one you pick.
 
 ## Run from source
 
@@ -94,8 +99,8 @@ workflow artifacts (no release is created), which is the easiest way to confirm
 the action is working. Push a version tag:
 
 ```bat
-git tag v2.0.0
-git push origin v2.0.0
+git tag v3.0.0
+git push origin v3.0.0
 ```
 
 The workflow reads the version from `clickstorm/__init__.py`, so bump it before
@@ -103,6 +108,20 @@ tagging. x64 and x86 build on `windows-latest` (x86 uses 32-bit Python); ARM64
 builds natively on the `windows-11-arm` runner. Running the workflow manually
 produces the same installers as downloadable build artifacts without creating a
 release.
+
+## Updates
+
+Click **UPDATES** in the title bar to check the latest GitHub release. The
+window compares it with the running version and, when a newer release exists,
+lists every installer the release publishes (x64, x86, arm64) with its size.
+The installer that matches this PC is preselected, but you can install any of
+them. **INSTALL UPDATE** downloads your choice over HTTPS, starts it, and
+closes ClickStorm so the installer can replace the running files; your
+settings in `%APPDATA%\ClickStorm` are kept.
+
+Update checks use the public GitHub API and need no account or token. Nothing
+is downloaded until you press **INSTALL UPDATE**, and the app never installs
+anything silently.
 
 ## Controls
 
@@ -120,25 +139,33 @@ limit expires, or when you press stop. In unlimited mode only stop ends a run.
 
 ## How the speed works
 
-- **Arrayed `SendInput`.** One call carries a small burst of clicks, which
-  removes the per-call cost that limits naive one-click-per-call loops.
-  Bursts stay at 25 clicks (50 input events) and shrink to 5 if the input
-  queue pushes back. Deliberately small arrays keep `SendInput` from blocking
-  on a slow target, which is what makes extreme settings feel slow.
-- **Steady burst pacing.** At higher rates the engine waits for a small batch
-  of click credit (about 4 ms worth) and sends it in one call instead of
-  dribbling one click per syscall. Stale credit is dropped rather than fired
-  as a huge catch-up burst, so STOP stays responsive and the reported CPS is
-  the rate actually reaching Windows.
-- **Paced credit, not dropped work.** The engine banks click credit at the
-  configured rate and only spends it on clicks Windows confirmed. Anything the
-  system rejects stays due and is retried, so a run ends on the exact target.
-- **Precision timing.** A 1 ms timer resolution plus a short sleep/spin
-  deadline keeps bursts on schedule, and the click thread runs at
-  time-critical priority while a session is active.
+- **Arrayed `SendInput`.** One call carries a whole megabyte-free array of
+  DOWN/UP `INPUT` structures, which removes the per-call cost that limits
+  naive one-click-per-call loops. The array is built once per session and
+  reused, so the hot loop never allocates. It starts at 16 clicks per call,
+  grows to 64 while everything lands and shrinks to 2 when Windows starts
+  rejecting events, which keeps a slow target from blocking `SendInput`.
+- **Millisecond batching math.** The target is converted to clicks per
+  millisecond (`cps / 1000`, so 25,000 CPS is 25 clicks/ms). The fractional
+  part is carried in a float bank, so a rate like 1,234 CPS (1.234 clicks/ms)
+  averages exactly 1,234 CPS instead of drifting.
+- **Catch-up for missed slots.** Every slot has an absolute deadline on
+  `perf_counter()`. If a turn wakes late, the engine counts the slots it
+  missed and adds their clicks to the same bank: two missed milliseconds at
+  25,000 CPS are paid out as 50 clicks on the next batch. More than 50 ms of
+  backlog is discarded so a system freeze cannot fire an unbounded burst; the
+  live footer shows how many clicks were recovered.
+- **Paced credit, not dropped work.** Click credit is only spent on clicks
+  Windows confirmed. A rejected shortfall goes back into the bank and is
+  retried on the next slot, so a run ends on the exact target.
+- **Precision timing.** A high-resolution waitable timer
+  (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`) covers most of each 1 ms slot and
+  the loop spins only the last few hundred microseconds, with
+  `timeBeginPeriod(1)` and time-critical thread priority while a session is
+  active. This holds the 1 ms grid without pinning an entire core.
 - **No cursor movement per click.** The mouse is not re-positioned for every
   click; SendInput clicks at the current position (fixed mode returns the
-  cursor to its point once per burst).
+  cursor to its point once per slot).
 
 ### Why high targets run flat out
 
@@ -180,6 +207,8 @@ clickstorm/engine.py     Click engine: pacing, batching, exact targets
 clickstorm/winapi.py     Dependency-free Win32 layer (SendInput, cursor, keys)
 clickstorm/settings.py   Persistent settings + migration
 clickstorm/settings_dialog.py  Advanced settings window
+clickstorm/updater.py     GitHub release lookup, download and installer launch
+clickstorm/update_dialog.py    In-app update window
 clickstorm/theme.py      Palette, fonts and custom Tk widgets
 autoclicker.ico          Application icon (window + exe + installer)
 AutoClicker.spec         PyInstaller build recipe
@@ -193,8 +222,8 @@ installer/ClickStorm.iss Inno Setup installer recipe
   many games ignore input delivered faster than their loop can consume.
 - **Clicks do nothing in an elevated app.** Rights are not inherited: run
   `ClickStorm.exe` as administrator as well.
-- **Stopping feels delayed at extreme rates.** A turn is capped at 100
-  clicks and bursts at 25 so stop is checked constantly, but a backed-up input
-  queue can still take a moment to drain.
+- **Stopping feels delayed at extreme rates.** Stop is checked on every 1 ms
+  slot and every `SendInput` call, but a backed-up input queue can still take
+  a moment to drain.
 - **Windows SmartScreen warns about the installer.** The build is not code
   signed, so choose "More info" → "Run anyway".

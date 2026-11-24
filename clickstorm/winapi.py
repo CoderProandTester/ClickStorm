@@ -8,6 +8,7 @@ and keeps the GUI completely free of Win32 details.
 from __future__ import annotations
 
 import ctypes
+import time
 from ctypes import wintypes
 from dataclasses import dataclass
 
@@ -69,6 +70,13 @@ THREAD_PRIORITY_NORMAL = 0
 THREAD_PRIORITY_HIGHEST = 2
 THREAD_PRIORITY_TIME_CRITICAL = 15
 
+# CreateWaitableTimerEx flags (Windows 10 1803+): a timer that can wake a
+# thread on a sub-millisecond deadline, which keeps the 1 ms click grid
+# accurate without spinning a whole core for every millisecond.
+CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002
+TIMER_ALL_ACCESS = 0x1F0003
+INFINITE = 0xFFFFFFFF
+
 ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
 HIGH_PRIORITY_CLASS = 0x00000080
 
@@ -102,6 +110,10 @@ class INPUT(ctypes.Structure):
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+class LARGE_INTEGER(ctypes.Union):
+    _fields_ = [("QuadPart", ctypes.c_longlong)]
 
 
 class RECT(ctypes.Structure):
@@ -184,6 +196,30 @@ kernel32.SetThreadPriority.restype = wintypes.BOOL
 kernel32.GetCurrentProcess.restype = wintypes.HANDLE
 kernel32.SetPriorityClass.argtypes = (wintypes.HANDLE, wintypes.DWORD)
 kernel32.SetPriorityClass.restype = wintypes.BOOL
+
+kernel32.CreateWaitableTimerExW.argtypes = (
+    ctypes.c_void_p,
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    wintypes.DWORD,
+)
+kernel32.CreateWaitableTimerExW.restype = wintypes.HANDLE
+
+kernel32.SetWaitableTimer.argtypes = (
+    wintypes.HANDLE,
+    ctypes.POINTER(LARGE_INTEGER),
+    wintypes.LONG,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    wintypes.BOOL,
+)
+kernel32.SetWaitableTimer.restype = wintypes.BOOL
+
+kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+kernel32.WaitForSingleObject.restype = wintypes.DWORD
+
+kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+kernel32.CloseHandle.restype = wintypes.BOOL
 
 winmm.timeBeginPeriod.argtypes = (wintypes.UINT,)
 winmm.timeBeginPeriod.restype = wintypes.UINT
@@ -475,6 +511,68 @@ def reset_thread_priority() -> bool:
 def set_process_priority(high: bool = True) -> bool:
     priority = HIGH_PRIORITY_CLASS if high else ABOVE_NORMAL_PRIORITY_CLASS
     return bool(kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), priority))
+
+
+class HighResTimer:
+    """One-shot high-resolution waitable timer.
+
+    ``sleep`` blocks for roughly the requested time and is used by the click
+    engine to cover most of each 1 ms slot; the engine spins the remainder.
+    Falls back to ``time.sleep`` when the OS cannot create a high-resolution
+    timer (before Windows 10 1803), where the 1 ms ``timeBeginPeriod``
+    request still applies.
+    """
+
+    def __init__(self) -> None:
+        self._handle = None
+        self._due = LARGE_INTEGER()
+        try:
+            handle = kernel32.CreateWaitableTimerExW(
+                None,
+                None,
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS,
+            )
+            if handle:
+                self._handle = handle
+        except Exception:
+            self._handle = None
+
+    @property
+    def high_resolution(self) -> bool:
+        return self._handle is not None
+
+    def sleep(self, seconds: float) -> None:
+        if seconds <= 0.0:
+            return
+        if self._handle is None:
+            time.sleep(seconds)
+            return
+        # SetWaitableTimer takes relative time in 100 ns units (negative).
+        due = -int(seconds * 10_000_000)
+        if due > -1:
+            due = -1
+        self._due.QuadPart = due
+        try:
+            if not kernel32.SetWaitableTimer(
+                self._handle, ctypes.byref(self._due), 0, None, None, False
+            ):
+                time.sleep(seconds)
+                return
+            kernel32.WaitForSingleObject(
+                self._handle, int(seconds * 1000.0) + 2
+            )
+        except Exception:
+            time.sleep(seconds)
+
+    def close(self) -> None:
+        handle = self._handle
+        self._handle = None
+        if handle:
+            try:
+                kernel32.CloseHandle(handle)
+            except Exception:
+                pass
 
 
 class TimerResolution:
