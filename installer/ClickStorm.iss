@@ -1,13 +1,13 @@
 ; ClickStorm installer (Inno Setup 6.3+).
 ;
 ; Compile:
-;   ISCC.exe /DMyAppArch=x64 /DMyAppVersion=3.0.0 installer\ClickStorm.iss
+;   ISCC.exe /DMyAppArch=x64 /DMyAppVersion=4.0.0 installer\ClickStorm.iss
 ;
 ; MyAppArch is one of: x64, x86, arm64. Build dist\ClickStorm.exe with the
 ; matching Python architecture first (PyInstaller is not a cross-compiler).
 
 #ifndef MyAppVersion
-  #define MyAppVersion "3.0.0"
+  #define MyAppVersion "4.0.0"
 #endif
 #ifndef MyAppArch
   #define MyAppArch "x64"

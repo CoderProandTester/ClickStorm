@@ -1104,20 +1104,30 @@ class ClickStormApp:
 
     def _update_rate_hint(self) -> None:
         rate = self._rate
+        # 1,000 ms per second, so the target over 1,000 is exactly the batch
+        # that belongs to one slot.
+        per_ms = rate / 1000.0
+        if per_ms >= 1:
+            batch = f"{per_ms:,.2f}".rstrip("0").rstrip(".")
+            slot_text = f"{batch} clicks every 1 ms slot"
+        else:
+            slot_text = f"1 click every {1000.0 / rate:,.2f} ms"
         if rate > 4_000:
-            text = "Above the ~4,000 CPS Windows input ceiling - it runs flat out."
+            text = (
+                f"{slot_text}, released as fast as Windows accepts them."
+            )
             color = COLORS["red"]
         elif rate > 2_000:
-            text = "Very fast. Apps that throttle input will register fewer clicks."
+            text = f"{slot_text}. Very fast; apps that throttle input register fewer."
             color = COLORS["amber"]
         elif rate >= 1000:
-            text = "High speed, high precision. Batched into one input call."
+            text = f"{slot_text}. High speed, high precision."
             color = COLORS["text_dim"]
         elif rate >= 100:
-            text = "Fast and app-friendly. Good for most games and tools."
+            text = f"{slot_text}. Fast and app-friendly."
             color = COLORS["faint"]
         else:
-            text = "Relaxed, human-speed clicking."
+            text = f"{slot_text}. Relaxed, human-speed clicking."
             color = COLORS["faint"]
         self.rate_hint.config(text=text, fg=color)
 

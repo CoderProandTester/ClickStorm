@@ -131,7 +131,7 @@ the spec is what keeps Windows from opening a console window.
 The Inno Setup script takes the app version and target architecture as defines:
 
 ```bat
-iscc /DMyAppArch=x64 /DMyAppVersion=3.0.0 installer\ClickStorm.iss
+iscc /DMyAppArch=x64 /DMyAppVersion=4.0.0 installer\ClickStorm.iss
 ```
 
 `MyAppArch` is `x64`, `x86` (32-bit) or `arm64`. Output:
@@ -170,15 +170,15 @@ Release procedure:
 4. Tag and push the tag:
 
    ```bat
-   git tag v3.0.0
-   git push origin v3.0.0
+   git tag v4.0.0
+   git push origin v4.0.0
    ```
 
    Without local git credentials, push a release branch instead — it publishes
    the same way and also creates the tag:
 
    ```bat
-   git push origin main:release/v3.0.0
+   git push origin main:release/v4.0.0
    ```
 
    Or run the workflow from the Actions UI with **publish** enabled.

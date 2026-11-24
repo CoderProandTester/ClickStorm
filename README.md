@@ -43,9 +43,13 @@ with Start-menu shortcuts and an entry in Settings → Apps.
 - Follow-cursor clicking or a fixed coordinate returned to on every burst.
 - Optional timing jitter, 0-5 s start delay, always-on-top and
   minimize-on-start.
-- Per-millisecond batching: at 25,000 CPS the engine sends 25 clicks in a
-  single `SendInput` call every 1 ms slot, and any missed slot is paid back as
-  catch-up clicks instead of being lost.
+- Per-millisecond pacing: the target is divided by 1,000, so 25,000 CPS means
+  25 clicks are released in every 1 ms slot (1,000 slots per second) and
+  500 CPS is one click every 2 ms. Credit is tracked against the real clock,
+  so fractional rates such as 1,234 CPS stay exact.
+- Small adaptive `SendInput` calls: one click per call at first, widening to
+  16 clicks only while calls stay far cheaper than a slot, because wide arrays
+  are measurably slower once an app throttles input.
 - Live stats: actual CPS, peak CPS, rate history, progress, ETA, batches,
   input events and failed events.
 - **UPDATES** button: checks the latest GitHub release, lists the installers it
@@ -101,15 +105,15 @@ the action is working. The publish job runs **only** for a version tag, a
 plain push to `main` never creates a release. Three ways to publish:
 
 ```bat
-git tag v3.0.0
-git push origin v3.0.0
+git tag v4.0.0
+git push origin v4.0.0
 ```
 
 or push a branch named after the version, which is the branch-only route for
 someone who can push commits but not tags:
 
 ```bat
-git push origin main:release/v3.0.0
+git push origin main:release/v4.0.0
 ```
 
 or, with no local git credentials at all, open **Actions → Windows installers →
@@ -152,22 +156,27 @@ limit expires, or when you press stop. In unlimited mode only stop ends a run.
 
 ## How the speed works
 
-- **Arrayed `SendInput`.** One call carries a whole megabyte-free array of
-  DOWN/UP `INPUT` structures, which removes the per-call cost that limits
-  naive one-click-per-call loops. The array is built once per session and
-  reused, so the hot loop never allocates. It starts at 16 clicks per call,
-  grows to 64 while everything lands and shrinks to 2 when Windows starts
-  rejecting events, which keeps a slow target from blocking `SendInput`.
+- **Small adaptive `SendInput` calls.** The `INPUT` array is built once per
+  session and reused, so the hot loop never allocates, and a call carries a
+  single click (DOWN + UP) at first. It widens to 2, 4 ... 16 clicks only
+  while a call stays far cheaper than a 1 ms slot, and narrows again the
+  moment a call gets slow or Windows rejects part of it. A 2-event call costs
+  about 20 us, while a 50-event call can cost milliseconds because `SendInput`
+  waits for the receiving app to drain its input queue - so wide batches lower
+  the delivered rate instead of raising it.
+- **A higher-priority process.** While a session runs, both the click thread
+  and the process class are raised so the click stream is not preempted by
+  background work, then both are restored when the run ends.
 - **Millisecond batching math.** The target is converted to clicks per
   millisecond (`cps / 1000`, so 25,000 CPS is 25 clicks/ms). The fractional
   part is carried in a float bank, so a rate like 1,234 CPS (1.234 clicks/ms)
   averages exactly 1,234 CPS instead of drifting.
-- **Catch-up for missed slots.** Every slot has an absolute deadline on
-  `perf_counter()`. If a turn wakes late, the engine counts the slots it
-  missed and adds their clicks to the same bank: two missed milliseconds at
-  25,000 CPS are paid out as 50 clicks on the next batch. More than 50 ms of
-  backlog is discarded so a system freeze cannot fire an unbounded burst; the
-  live footer shows how many clicks were recovered.
+- **Time-based catch-up.** Credit is accrued from `perf_counter()` deltas
+  rather than from a fixed tick, so a late wake-up is repaid on the next turn
+  (a 2 ms hiccup at 25,000 CPS owes 50 clicks) and fractional rates never
+  drift. Backlog is capped at 20 ms of the target rate, so a target faster
+  than the machine can deliver degrades into a steady stream at the real
+  ceiling instead of a giant burst that makes the run look frozen.
 - **Paced credit, not dropped work.** Click credit is only spent on clicks
   Windows confirmed. A rejected shortfall goes back into the bank and is
   retried on the next slot, so a run ends on the exact target.
@@ -180,16 +189,30 @@ limit expires, or when you press stop. In unlimited mode only stop ends a run.
   click; SendInput clicks at the current position (fixed mode returns the
   cursor to its point once per slot).
 
-### Why high targets run flat out
+### Measured speed
 
 Windows serialises injected input through a single system input thread, and the
-receiving application consumes it on its own message loop. Independent
-benchmarks of native clickers put the delivered ceiling at roughly
-**2,000-4,000 CPS**; above that, extra requested clicks are not delivered by
-Windows itself. `25,000` is therefore offered as a "run as fast as the machine
-allows" setting: the live CPS readout shows what actually reached Windows.
-For games and apps that throttle input, **500-2,000 CPS** usually registers
-more reliably than an extreme setting.
+receiving application consumes it on its own message loop, so the real ceiling
+belongs to the target rather than to ClickStorm. Measured with ClickStorm
+4.0.0 clicking into a window that counted every click it received:
+
+| Target | Delivered |
+| --- | --- |
+| 500 CPS | 499 CPS |
+| 1,000 CPS | 999 CPS |
+| 5,000 CPS | 4,960 CPS |
+| 25,000 CPS | 5,708 CPS |
+
+Version 4.0.0 replaced the wide catch-up bursts of earlier builds (16 clicks
+per call, growing to 64) with small adaptive calls. On the same machine, a
+5,000 CPS target delivered about **166 CPS** before that change and about
+**4,950 CPS** after it, and a 25,000 CPS target went from about 214 CPS to
+about 5,700 CPS.
+
+Above the ceiling, `25,000` behaves as a "run as fast as this app allows"
+setting: the live CPS readout shows what actually reached Windows. Games and
+apps that throttle input usually register **500-2,000 CPS** more reliably than
+an extreme setting.
 
 ## Settings and files
 

@@ -79,6 +79,7 @@ INFINITE = 0xFFFFFFFF
 
 ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
 HIGH_PRIORITY_CLASS = 0x00000080
+NORMAL_PRIORITY_CLASS = 0x00000020
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +512,14 @@ def reset_thread_priority() -> bool:
 def set_process_priority(high: bool = True) -> bool:
     priority = HIGH_PRIORITY_CLASS if high else ABOVE_NORMAL_PRIORITY_CLASS
     return bool(kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), priority))
+
+
+def reset_process_priority() -> bool:
+    return bool(
+        kernel32.SetPriorityClass(
+            kernel32.GetCurrentProcess(), NORMAL_PRIORITY_CLASS
+        )
+    )
 
 
 class HighResTimer:
