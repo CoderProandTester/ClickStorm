@@ -28,7 +28,10 @@ use std::time::{Duration, Instant};
 pub const ABI_VERSION: u32 = 1;
 
 const MIN_CPS: f64 = 1.0;
-const MAX_CPS: f64 = 25_000.0;
+// SendInput cannot reach this, but posted/synchronous window messages skip
+// the system input thread, so the target is free to ask for more and let the
+// receiver's real ceiling show up in the delivered counter.
+const MAX_CPS: f64 = 100_000.0;
 const MAX_CLICKS: i64 = 25_000;
 const MAX_DURATION: f64 = 86_400.0;
 
@@ -161,6 +164,9 @@ impl Button {
 enum Delivery {
     SendInput,
     Direct,
+    /// `SendMessageTimeout`: the target handles the click before the call
+    /// returns, so it never waits in the (10,000-message) posted queue.
+    Sync,
     Auto,
 }
 
@@ -192,6 +198,7 @@ impl Config {
             delivery: match delivery {
                 1 => Delivery::Direct,
                 2 => Delivery::Auto,
+                3 => Delivery::Sync,
                 _ => Delivery::SendInput,
             },
             limit_mode: if limit <= 2 { limit } else { 0 },
@@ -560,6 +567,15 @@ mod platform {
         fn PostMessageW(hwnd: isize, msg: Uint, wparam: Wparam, lparam: Lparam) -> Bool;
         fn SetForegroundWindow(hwnd: isize) -> Bool;
         fn GetWindowThreadProcessId(hwnd: isize, pid: *mut Dword) -> Dword;
+        fn SendMessageTimeoutW(
+            hwnd: isize,
+            msg: Uint,
+            wparam: Wparam,
+            lparam: Lparam,
+            flags: Uint,
+            timeout: Uint,
+            result: *mut usize,
+        ) -> isize;
     }
 
     #[link(name = "kernel32")]
@@ -592,6 +608,8 @@ mod platform {
         ) -> Bool;
         fn WaitForSingleObject(handle: Handle, millis: Dword) -> Dword;
         fn CloseHandle(handle: Handle) -> Bool;
+        fn SetLastError(code: Dword);
+        fn GetLastError() -> Dword;
     }
 
     #[link(name = "winmm")]
@@ -615,6 +633,11 @@ mod platform {
     const THREAD_INFORMATION_CLASS_POWER_THROTTLING: i32 = 1;
     const THREAD_POWER_THROTTLING_CURRENT_VERSION: Uint = 1;
     const THREAD_POWER_THROTTLING_EXECUTION_SPEED: Uint = 0x1;
+    // Block while waiting, with the timeout as the only escape. SMTO_ABORTIFHUNG
+    // is deliberately not used: it can return zero without setting
+    // ERROR_TIMEOUT, which would make an unprocessed click look successful.
+    const SMTO_BLOCK: Uint = 0x0001;
+    const ERROR_TIMEOUT: Dword = 1460;
 
     const YIELD_SECONDS: f64 = 0.002;
     const SPIN_SECONDS: f64 = 0.000_050;
@@ -708,10 +731,13 @@ mod platform {
         let mut point = None;
 
         if delivery == Delivery::Auto {
-            delivery = if cfg.cps > 6_000.0 { Delivery::Direct } else { Delivery::SendInput };
+            // Prefer synchronous delivery above the SendInput ceiling: it
+            // registers each click instead of letting a posted queue drop
+            // the surplus.
+            delivery = if cfg.cps > 6_000.0 { Delivery::Sync } else { Delivery::SendInput };
         }
 
-        if delivery == Delivery::Direct {
+        if matches!(delivery, Delivery::Direct | Delivery::Sync) {
             if let Some(at) = current_point(cfg) {
                 point = Some(at);
                 target = resolve_target(at.0, at.1, cfg.button);
@@ -723,10 +749,10 @@ mod platform {
                     focus_target(target.hwnd);
                 }
             }
-            if delivery == Delivery::Direct && target.is_none() {
+            if matches!(delivery, Delivery::Direct | Delivery::Sync) && target.is_none() {
                 return Err(
-                    "Direct delivery found no clickable window under the cursor. Move the \
-                     cursor over the target window (not ClickStorm) and start again."
+                    "Message delivery found no clickable window under the cursor. Move \
+                     the cursor over the target window (not ClickStorm) and start again."
                         .to_string(),
                 );
             }
@@ -878,11 +904,21 @@ mod platform {
                                     .to_string()
                             }
                             Some(t) => {
-                                accepted = post_clicks(t, due);
+                                accepted = if delivery == Delivery::Sync {
+                                    sync_clicks(t, due, 20)
+                                } else {
+                                    post_clicks(t, due)
+                                };
                                 if accepted < due {
-                                    detail = "The target window rejected some posted clicks. \
-                                              Try SendInput delivery instead."
-                                        .to_string();
+                                    detail = if delivery == Delivery::Sync {
+                                        "The target window timed out or rejected some \
+                                         synchronous clicks."
+                                            .to_string()
+                                    } else {
+                                        "The target window rejected some posted clicks. \
+                                         Try SendInput delivery instead."
+                                            .to_string()
+                                    };
                                 }
                             }
                         }
@@ -1054,6 +1090,54 @@ mod platform {
     unsafe fn focus_target(hwnd: isize) {
         let root = GetAncestor(hwnd, GA_ROOT);
         SetForegroundWindow(if root != 0 { root } else { hwnd });
+    }
+
+    /// Deliver clicks synchronously: the target's window procedure handles
+    /// each message before `SendMessageTimeoutW` returns, so nothing sits in
+    /// the posted-message queue and no click is lost to queue pressure.
+    /// A timeout (rather than a zero result) means the window did not process
+    /// it; in that case the release is posted so the button cannot latch.
+    unsafe fn sync_clicks(target: Target, count: i64, timeout_ms: Uint) -> i64 {
+        if count <= 0 {
+            return 0;
+        }
+        let (down_msg, up_msg, down_wparam, up_wparam) = target.button.messages();
+        let lparam =
+            ((((target.y as u32) & 0xFFFF) << 16) | ((target.x as u32) & 0xFFFF)) as Lparam;
+        let flags = SMTO_BLOCK;
+        let mut result: usize = 0;
+        let mut accepted = 0;
+        for _ in 0..count {
+            SetLastError(0);
+            let down = SendMessageTimeoutW(
+                target.hwnd,
+                down_msg,
+                down_wparam,
+                lparam,
+                flags,
+                timeout_ms,
+                &mut result,
+            );
+            if down == 0 && GetLastError() == ERROR_TIMEOUT {
+                break;
+            }
+            SetLastError(0);
+            let up = SendMessageTimeoutW(
+                target.hwnd,
+                up_msg,
+                up_wparam,
+                lparam,
+                flags,
+                timeout_ms,
+                &mut result,
+            );
+            if up == 0 && GetLastError() == ERROR_TIMEOUT {
+                PostMessageW(target.hwnd, up_msg, up_wparam, lparam);
+                break;
+            }
+            accepted += 1;
+        }
+        accepted
     }
 
     unsafe fn post_clicks(target: Target, count: i64) -> i64 {

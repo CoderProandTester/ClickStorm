@@ -7,8 +7,9 @@ target registered - not the rate ClickStorm asked for.
     python tools\\click_counter.py
 
 In ClickStorm, point at this window and start a run. SendInput delivery sends
-real mouse input; Direct/AUTO delivery posts button messages straight to the
-window. Both are counted here. The "unpaired" figure is the number of downs
+real mouse input; Direct posts button messages; SYNC sends them synchronously
+and waits for this window to handle each one; AUTO picks SYNC above 6,000 CPS.
+All of them are counted here. The "unpaired" figure is the number of downs
 without a matching up: a non-zero value that keeps growing means a receiver
 dropped the release, which is what a latched mouse button looks like.
 
@@ -71,9 +72,9 @@ class ClickCounter:
         tk.Label(
             frame,
             text=(
-                "Click this window with ClickStorm. SendInput and Direct/AUTO "
-                "are both counted.\nThe count is what Windows delivered to "
-                "this app, not what was requested."
+                "Click this window with ClickStorm. SendInput, Direct, SYNC "
+                "and AUTO are all counted.\nThe count is what Windows "
+                "delivered to this app, not what was requested."
             ),
             bg="#0b1418",
             fg="#5d7d8a",

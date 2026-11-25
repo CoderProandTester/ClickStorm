@@ -68,9 +68,18 @@ properties when changing it:
 - **Small `SendInput` arrays.** Large arrays make `SendInput` block while the
   target drains its input queue, which shows up as a low click rate and a
   sluggish STOP. Keep bursts small and adaptive.
-- **`auto` delivery must never click into nothing.** It picks direct posting
-  only above `SENDINPUT_CEILING_CPS` and only when a target window resolves;
-  otherwise it falls back to SendInput for that session.
+- **`auto` delivery must never click into nothing.** It picks synchronous
+  message delivery only above `SENDINPUT_CEILING_CPS` and only when a target
+  window resolves; otherwise it falls back to SendInput for that session.
+- **Message delivery must never hang the clicker.** SYNC uses
+  `SendMessageTimeout` with a bounded timeout; a timed-out release is posted so
+  the target cannot be left with the button down. Never replace it with a bare
+  `SendMessage`, and do not add `SMTO_ABORTIFHUNG` (it can fail without setting
+  `ERROR_TIMEOUT`, which would count an unprocessed click as delivered).
+- **The native fallback is a safety net, not a retry loop.** A native session
+  that refuses to start, or errors before delivering any click, restarts once
+  on the Python engine under the same session id. An error after real work is
+  reported to the UI rather than silently retried.
 - **Exact click targets.** Click credit is only spent on clicks Windows
   accepted. Rejected clicks must stay due and be retried rather than silently
   dropped.
@@ -219,7 +228,8 @@ without creating a release.
 - Keep the change focused; separate refactors from behaviour changes.
 - Describe what changed, why, and how you tested it (Windows version and
   architecture included).
-- Include before/after CPS numbers for engine changes.
+- Include before/after CPS numbers for engine changes, and say which
+  delivery mode (SendInput, Direct, SYNC, AUTO) and target you measured.
 - Do not commit `dist/`, `build/`, `release/`, `.venv/` or `__pycache__`;
   `.gitignore` already excludes them.
 - Code style is PEP 8, 4-space indents, type hints on public functions and

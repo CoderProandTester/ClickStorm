@@ -152,7 +152,7 @@ THREAD_PRIORITY_ABOVE_NORMAL = 1
 VK_F6 = 0x75
 VK_ESCAPE = 0x1B
 
-__version__ = "4.4.0"  # keep in sync with clickstorm/__init__.py
+__version__ = "4.5.0"  # keep in sync with clickstorm/__init__.py
 
 DEFAULT_CPS = 25_000.0
 DEFAULT_BATCH = 25
@@ -574,7 +574,7 @@ def main(argv=None) -> int:
             f"({gauntlet._event_count} input events) per SendInput call"
         )
     if shared is not None:
-        note = "" if args.cps > 0.0 else "  (uncapped maps to the 25,000 ceiling)"
+        note = "" if args.cps > 0.0 else "  (uncapped maps to the 100,000 ceiling)"
         print(f"  target      {_format_rate(target)} CPS, paced by the engine{note}")
     elif target > 0.0:
         per_second = gauntlet.cps / gauntlet.batch

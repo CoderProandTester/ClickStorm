@@ -17,7 +17,7 @@ from . import APP_DATA_DIR
 from .engine import MAX_CLICKS, MAX_CPS, MAX_DURATION, MIN_CPS
 from .winapi import BUTTONS, HOTKEY_KEYS
 
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 3
 _GEOMETRY_RE = re.compile(r"^\d+x\d+([+-]\d+[+-]\d+)?$")
 
 #: Why the last :meth:`Settings.save` call failed, for the UI to show. Empty
@@ -48,8 +48,9 @@ class Settings:
 
     start_delay: float = 2.0
     jitter_percent: float = 0.0
-    delivery: str = "sendinput"
+    delivery: str = "sendinput"  # sendinput | direct | sync | auto
     pin_window: bool = False
+    force_python_engine: bool = False
     position_mode: str = "cursor"
     fixed_x: int = 0
     fixed_y: int = 0
@@ -122,9 +123,10 @@ class Settings:
         out.start_delay = number("start_delay", 0.0, 10.0)
         out.jitter_percent = number("jitter_percent", 0.0, 0.75)
         out.delivery = choice(
-            "delivery", ("sendinput", "direct", "auto"), "sendinput"
+            "delivery", ("sendinput", "direct", "sync", "auto"), "sendinput"
         )
         out.pin_window = boolean("pin_window")
+        out.force_python_engine = boolean("force_python_engine")
         out.position_mode = choice(
             "position_mode", ("cursor", "fixed"), "cursor"
         )

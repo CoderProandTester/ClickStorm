@@ -122,11 +122,11 @@ class ClickStormApp:
     def __init__(self, root: tk.Tk, settings: Settings):
         self.root = root
         self.settings = settings
-        self.engine = make_engine()
+        self.engine = make_engine(bool(settings.force_python_engine))
+        self._engine_force_python = bool(settings.force_python_engine)
+        self._shown_backend = getattr(self.engine, "backend_name", "Python")
 
         self.shutdown = False
-        self._gc_suspended = False
-        self._gc_was_enabled = True
         self._save_job = None
         self._settings_open = False
         self._settings_dialog = None
@@ -465,10 +465,10 @@ class ClickStormApp:
         for label, value in (
             ("10", 10),
             ("100", 100),
-            ("500", 500),
             ("1K", 1000),
             ("5K", 5000),
             ("10K", 10000),
+            ("25K", 25000),
             ("MAX", MAX_CPS),
         ):
             button = theme.PillButton(
@@ -1052,9 +1052,10 @@ class ClickStormApp:
     def _refresh_engine_strip(self) -> None:
         delivery = {
             "sendinput": "SendInput, small adaptive batches",
-            "direct": "Direct window messages (experimental)",
+            "direct": "Direct posted window messages",
+            "sync": "Synchronous window messages (handled per click)",
             "auto": (
-                "AUTO - Direct above "
+                "AUTO - Sync above "
                 f"{fmt_rate(SENDINPUT_CEILING_CPS)} CPS"
             ),
         }.get(self.settings.delivery, "SendInput, small adaptive batches")
@@ -1074,6 +1075,8 @@ class ClickStormApp:
             else ""
         )
         backend = getattr(self.engine, "backend_name", "Python")
+        if getattr(self.engine, "last_fallback_reason", ""):
+            backend += " (fallback)"
         self.engine_info_var.set(
             f"{backend} engine  \u00b7  {delivery}  \u00b7  {position}{pinned}{jitter}\n"
             f"Three-tier wait  \u00b7  high-priority click thread"
@@ -1087,7 +1090,8 @@ class ClickStormApp:
             delay_text = "instant start"
         mode = {
             "direct": "Direct",
-            "auto": "AUTO delivery",
+            "sync": "Sync",
+            "auto": "AUTO (sync) delivery",
         }.get(self.settings.delivery, "SendInput")
         self.footer_title_var.set("Ready to click")
         self.footer_sub_var.set(
@@ -1143,9 +1147,15 @@ class ClickStormApp:
                 text = (
                     f"{slot_text}. SendInput tops out near "
                     f"{fmt_rate(SENDINPUT_CEILING_CPS)} CPS here - set "
-                    "Delivery to AUTO for the full rate."
+                    "Delivery to SYNC or AUTO for the full rate."
                 )
                 color = COLORS["red"]
+            elif self.settings.delivery == "sync":
+                text = (
+                    f"{slot_text}, delivered synchronously - the window "
+                    "handles every click before the next one is sent."
+                )
+                color = COLORS["green"]
             else:
                 text = f"{slot_text}, delivered over the direct path."
                 color = COLORS["green"]
@@ -1428,6 +1438,9 @@ class ClickStormApp:
         if not self._validate_rate():
             return
 
+        # A change to Force Python made while a run was active applies here.
+        self._apply_engine_choice()
+
         self.settings.cps = self._rate
         self.settings.mouse_button = self.mouse_button_var.get()
         self.settings.limit_mode = self._limit_mode
@@ -1529,7 +1542,6 @@ class ClickStormApp:
             return
 
         stats = self.engine.get_stats()
-        self._suspend_gc()
         self._active_session_id = stats.session_id
         self._run_active = True
         self._session_committed = False
@@ -1602,7 +1614,6 @@ class ClickStormApp:
                 )
 
     def _finish_session(self, reason: str, error_message: str, clicks: int) -> None:
-        self._resume_gc()
         if not self._run_active and self._session_committed:
             return
 
@@ -1689,6 +1700,13 @@ class ClickStormApp:
             return
         try:
             self._poll_engine_events()
+
+            # A native session may have fallen back to Python mid-run; show
+            # which core is actually clicking without touching the hot path.
+            backend = getattr(self.engine, "backend_name", "Python")
+            if backend != self._shown_backend:
+                self._shown_backend = backend
+                self._refresh_engine_strip()
 
             now = time.perf_counter()
             if now - self._last_ui_stats_time >= 0.05:
@@ -2012,6 +2030,7 @@ class ClickStormApp:
         self._update_rate_hint()
         self._update_limit_summary()
         self._update_footer_idle()
+        self._apply_engine_choice()
         # The dialog writes the file itself before it closes, so a failure is
         # reported there instead of being swallowed here. This second write
         # only covers callers that build a Settings object directly.
@@ -2052,30 +2071,30 @@ class ClickStormApp:
             _log_exception("Saving settings")
 
     # ------------------------------------------------------------------
-    # Garbage collection during a run
+    # Engine choice
     # ------------------------------------------------------------------
 
-    def _suspend_gc(self) -> None:
-        """Turn Python's cyclic GC off while the click engine is running.
+    def _apply_engine_choice(self) -> None:
+        """Rebuild the click engine when the Force Python setting changes.
 
-        The native engine clicks on its own Rust thread, so no Python object
-        is allocated per click. Suspending the collector removes the last way
-        a Python-side pause could touch a session; reference counting still
-        frees ordinary objects, and collection resumes when the run ends.
+        A run that is already clicking keeps the engine it started with; the
+        change applies to the next run, so toggling the setting can never
+        swap the engine out from under a live session.
         """
-        if self._gc_suspended:
+        wanted = bool(self.settings.force_python_engine)
+        if wanted == self._engine_force_python:
             return
-        self._gc_was_enabled = gc.isenabled()
-        if self._gc_was_enabled:
-            gc.disable()
-        self._gc_suspended = True
-
-    def _resume_gc(self) -> None:
-        if not self._gc_suspended:
+        if self._run_active or self._countdown_active:
             return
-        self._gc_suspended = False
-        if self._gc_was_enabled:
-            gc.enable()
+        old = self.engine
+        try:
+            old.close(0.5)
+        except Exception:
+            pass
+        self.engine = make_engine(wanted)
+        self._engine_force_python = wanted
+        self._shown_backend = getattr(self.engine, "backend_name", "Python")
+        self._refresh_engine_strip()
 
     # ------------------------------------------------------------------
     # Updates
@@ -2144,7 +2163,6 @@ class ClickStormApp:
             except Exception:
                 pass
             self._save_job = None
-        self._resume_gc()
 
         if self._run_active and not self._session_committed:
             try:

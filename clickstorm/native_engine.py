@@ -38,7 +38,7 @@ _STATS_STATE = ("idle", "running", "stopped", "error")
 _REASON = ("", "stopped", "target", "duration", "error")
 
 BUTTON_CODES = {"Left": 0, "Right": 1, "Middle": 2, "X1": 3, "X2": 4}
-DELIVERY_CODES = {"sendinput": 0, "direct": 1, "auto": 2}
+DELIVERY_CODES = {"sendinput": 0, "direct": 1, "auto": 2, "sync": 3}
 LIMIT_CODES = {"unlimited": 0, "clicks": 1, "duration": 2}
 
 

@@ -50,17 +50,18 @@ from __future__ import annotations
 import random
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import winapi
 
 
 MIN_CPS = 1.0
-# SendInput injects through one system input thread. Benchmarks of native
-# clickers put delivered input at roughly 2,000-4,000 CPS, so 25,000 is the
-# highest target worth offering: it lets a fast machine run flat out, and the
-# 25 clicks/ms schedule is the example the pacing math is designed around.
-MAX_CPS = 25_000.0
+# SendInput injects through one system input thread and tops out well below
+# this. Posted or synchronous window messages skip that thread and can be
+# consumed faster, so the target now runs to 100,000 CPS: the engine still
+# reports what the target accepted, and an unreachable target simply settles
+# at its real ceiling instead of being artificially capped at 25,000.
+MAX_CPS = 100_000.0
 MAX_CLICKS = 25_000
 MAX_DURATION = 86_400.0
 
@@ -110,7 +111,7 @@ class EngineConfig:
     limit_mode: str = "unlimited"  # unlimited | clicks | duration
     click_limit: int = 5_000
     duration: float = 10.0
-    delivery: str = "sendinput"  # sendinput | direct | auto
+    delivery: str = "sendinput"  # sendinput | direct | sync | auto
     pin_window: bool = False
     jitter_percent: float = 0.0
     position_mode: str = "cursor"  # cursor | fixed
@@ -126,7 +127,7 @@ class EngineConfig:
         button = self.button if self.button in winapi.BUTTONS else "Left"
         delivery = (
             self.delivery
-            if self.delivery in ("sendinput", "direct", "auto")
+            if self.delivery in ("sendinput", "direct", "sync", "auto")
             else "sendinput"
         )
         position = (
@@ -405,10 +406,11 @@ class ClickEngine:
 
         delivery = config.delivery
         if delivery == "auto":
-            # Choose the path that can actually reach the requested rate:
-            # SendInput is capped by Windows, posted messages are not.
+            # Choose the path that can register the requested rate: SendInput
+            # is capped by Windows; synchronous window messages skip both the
+            # input thread and the posted-message queue.
             delivery = (
-                "direct"
+                "sync"
                 if config.cps > SENDINPUT_CEILING_CPS
                 else "sendinput"
             )
@@ -416,7 +418,7 @@ class ClickEngine:
         direct_target = None
         direct_point = None
         pinned = False
-        if delivery == "direct":
+        if delivery in ("direct", "sync"):
             point = self._point(config, fixed_x, fixed_y)
             if point is not None:
                 # Requested pinning is remembered even when nothing was found
@@ -598,12 +600,21 @@ class ClickEngine:
                                 "No clickable window was found under the cursor."
                             )
                         else:
-                            accepted = winapi.post_clicks(direct_target, due)
-                            if accepted < due:
-                                detail = (
-                                    "The target window rejected some posted "
-                                    "clicks. Try SendInput delivery instead."
-                                )
+                            if delivery == "sync":
+                                accepted = winapi.sync_clicks(direct_target, due)
+                                if accepted < due:
+                                    detail = (
+                                        "The target window timed out or "
+                                        "rejected some synchronous clicks."
+                                    )
+                            else:
+                                accepted = winapi.post_clicks(direct_target, due)
+                                if accepted < due:
+                                    detail = (
+                                        "The target window rejected some "
+                                        "posted clicks. Try SendInput delivery "
+                                        "instead."
+                                    )
 
                 call_seconds = time.perf_counter() - call_start
 
@@ -738,20 +749,242 @@ class ClickEngine:
         return winapi.get_cursor_pos()
 
 
-def make_engine():
+class ResilientEngine:
+    """One engine facade: native first, Python after an immediate failure.
+
+    The native core is tried first. If it refuses to start, or errors before
+    it has delivered a meaningful run, the same configuration is restarted on
+    the Python engine and the run continues under one stable session id, so
+    the UI never sees a failed run. An error after real work is still reported
+    normally - a fallback must not hide a session that was already clicking.
+    """
+
+    _COUNTERS = (
+        "clicks_sent",
+        "clicks_requested",
+        "input_events",
+        "send_calls",
+        "batches",
+        "failed_events",
+        "catchup_clicks",
+        "late_ticks",
+        "dropped_clicks",
+    )
+
+    def __init__(
+        self,
+        primary,
+        fallback_factory=ClickEngine,
+        immediate_window: float = 0.75,
+    ) -> None:
+        self._primary = primary
+        self._fallback_factory = fallback_factory
+        self._fallback = None
+        self._active = primary
+        self._native_active = True
+        self._immediate_window = immediate_window
+        self._lock = threading.Lock()
+        self._session_id = 0
+        self._started = False
+        self._config = EngineConfig()
+        self._offsets = {name: 0 for name in self._COUNTERS}
+        self._elapsed_offset = 0.0
+        self._fallback_reason = ""
+
+    # -- public API -----------------------------------------------------
+
+    @property
+    def backend_name(self) -> str:
+        return "Rust" if self._native_active else "Python"
+
+    @property
+    def last_fallback_reason(self) -> str:
+        return self._fallback_reason
+
+    def start(self, config: EngineConfig) -> bool:
+        with self._lock:
+            config = config.normalised()
+            self._stop_quietly(self._primary)
+            if self._fallback is not None:
+                self._stop_quietly(self._fallback)
+            self._offsets = {name: 0 for name in self._COUNTERS}
+            self._elapsed_offset = 0.0
+            self._fallback_reason = ""
+            self._native_active = True
+            self._active = self._primary
+
+            started = False
+            try:
+                started = bool(self._primary.start(config))
+            except Exception as exc:  # a broken DLL must not kill the app
+                self._fallback_reason = f"native engine failed to start: {exc}"
+
+            if not started:
+                if not self._fallback_reason:
+                    self._fallback_reason = "native engine refused to start"
+                # The native engine never began this session, so its stats
+                # still describe an older run and must not be carried over.
+                if not self._switch_to_fallback(collect=False):
+                    return False
+                if not self._fallback.start(config):
+                    return False
+
+            self._session_id += 1
+            self._started = True
+            self._config = config
+            return True
+
+    def stop(self) -> None:
+        try:
+            self._active.stop()
+        except Exception:
+            pass
+
+    def close(self, timeout: float = 1.5) -> None:
+        for engine in (self._primary, self._fallback):
+            if engine is None:
+                continue
+            try:
+                engine.close(timeout)
+            except Exception:
+                pass
+
+    def is_running(self) -> bool:
+        try:
+            return bool(self._active.is_running())
+        except Exception:
+            return False
+
+    def poll_events(self) -> list[EngineEvent]:
+        with self._lock:
+            if not self._started:
+                return []
+            if not self._native_active:
+                return self._rewrite(self._fallback.poll_events())
+
+            events = self._primary.poll_events()
+            for event in events:
+                if event.kind == "error" and self._failed_immediately():
+                    reason = event.message or "native engine errored immediately"
+                    if self._switch_to_fallback() and self._fallback.start(
+                        self._config
+                    ):
+                        # The run continues on the Python engine under the
+                        # same session id; the UI only sees the restored run.
+                        self._fallback_reason = reason
+                        return []
+                    # The fallback could not take over: report the original
+                    # native failure rather than pretending the run is alive.
+                    return self._rewrite([event])
+                return self._rewrite([event])
+            return []
+
+    def get_stats(self) -> EngineStats:
+        with self._lock:
+            stats = self._active.get_stats()
+            if self._native_active:
+                return replace(stats, session_id=self._session_id)
+            elapsed = stats.elapsed + self._elapsed_offset
+            total_clicks = stats.clicks_sent + self._offsets["clicks_sent"]
+            extra = {
+                "clicks_sent": self._offsets["clicks_sent"],
+                "clicks_requested": self._offsets["clicks_requested"],
+                "input_events": self._offsets["input_events"],
+                "send_calls": self._offsets["send_calls"],
+                "batches": self._offsets["batches"],
+                "failed_events": self._offsets["failed_events"],
+                "catchup_clicks": self._offsets["catchup_clicks"],
+                "late_ticks": self._offsets["late_ticks"],
+                "dropped_clicks": self._offsets["dropped_clicks"],
+            }
+            return replace(
+                stats,
+                session_id=self._session_id,
+                elapsed=elapsed,
+                average_cps=(total_clicks / elapsed if elapsed > 0.0005 else 0.0),
+                **{
+                    name: getattr(stats, name) + extra[name]
+                    for name in self._COUNTERS
+                },
+            )
+
+    # -- internals ------------------------------------------------------
+
+    def _switch_to_fallback(self, collect: bool = True) -> bool:
+        if self._fallback is None:
+            try:
+                self._fallback = self._fallback_factory()
+            except Exception as exc:
+                self._fallback_reason = (
+                    f"Python fallback could not start: {exc}"
+                )
+                return False
+
+        stats = None
+        if collect:
+            try:
+                stats = self._primary.get_stats()
+            except Exception:
+                pass
+        if stats is not None:
+            for name in self._COUNTERS:
+                self._offsets[name] += int(getattr(stats, name))
+            self._elapsed_offset += float(stats.elapsed)
+        self._stop_quietly(self._primary)
+        if self._primary.is_running():
+            # Never run two clickers side by side just to recover a run.
+            self._fallback_reason = (
+                "native engine did not stop; refusing to start a second clicker"
+            )
+            return False
+        self._native_active = False
+        self._active = self._fallback
+        return True
+
+    def _failed_immediately(self) -> bool:
+        try:
+            stats = self._primary.get_stats()
+        except Exception:
+            return True
+        return (
+            stats.elapsed < self._immediate_window
+            or stats.clicks_sent == 0
+        )
+
+    @staticmethod
+    def _stop_quietly(engine) -> None:
+        try:
+            if not engine.is_running():
+                return
+            engine.stop()
+            deadline = time.perf_counter() + 0.35
+            while engine.is_running() and time.perf_counter() < deadline:
+                time.sleep(0.005)
+        except Exception:
+            pass
+
+    def _rewrite(self, events: list[EngineEvent]) -> list[EngineEvent]:
+        return [
+            replace(event, session_id=self._session_id) for event in events
+        ]
+
+
+def make_engine(force_python: bool = False):
     """Return the best available engine behind the one ClickEngine API.
 
-    The native Rust core is used when its DLL is present and speaks this
-    app's ABI; otherwise the pure Python engine runs unchanged. Both expose
-    start/stop/close/poll_events/is_running/get_stats, so the UI never needs
-    to know which one it got.
+    ``force_python`` is the user-facing escape hatch for machines where the
+    native DLL loads but cannot click. Otherwise the Rust core is wrapped in a
+    :class:`ResilientEngine`, which restarts an immediately failing native
+    session on the Python engine instead of showing a failed run.
     """
+    if force_python:
+        return ClickEngine()
     try:
         from .native_engine import create_native_engine
 
         engine = create_native_engine()
         if engine is not None:
-            return engine
+            return ResilientEngine(engine)
     except Exception:
         pass
     return ClickEngine()

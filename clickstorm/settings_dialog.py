@@ -14,7 +14,7 @@ from .theme import COLORS
 
 class SettingsDialog(tk.Toplevel):
     WIDTH = 840
-    HEIGHT = 664
+    HEIGHT = 700
 
     def __init__(self, parent, settings: Settings, on_save):
         super().__init__(parent)
@@ -32,6 +32,9 @@ class SettingsDialog(tk.Toplevel):
 
         self.delivery_var = tk.StringVar(value=settings.delivery)
         self.pin_window_var = tk.BooleanVar(value=settings.pin_window)
+        self.force_python_var = tk.BooleanVar(
+            value=settings.force_python_engine
+        )
         self.position_var = tk.StringVar(value=settings.position_mode)
         self.hotkeys_enabled_var = tk.BooleanVar(value=settings.hotkeys_enabled)
         self.performance_var = tk.BooleanVar(value=settings.performance_mode)
@@ -153,11 +156,12 @@ class SettingsDialog(tk.Toplevel):
             options=(
                 ("sendinput", "SENDINPUT"),
                 ("direct", "DIRECT"),
+                ("sync", "SYNC"),
                 ("auto", "AUTO"),
             ),
             variable=self.delivery_var,
             bg=COLORS["card"],
-            button_width=104,
+            button_width=78,
             button_height=32,
             font_size=8,
             accent=COLORS["accent"],
@@ -172,12 +176,15 @@ class SettingsDialog(tk.Toplevel):
         theme.make_label(
             inner,
             "SendInput works with everything, but Windows caps real injected "
-            "input near 6,000 CPS. Direct posts button messages straight to "
-            "the window, which reaches the full 25,000 CPS but only works "
-            "with classic Win32 windows. AUTO uses Direct above 6,000 CPS and "
-            "SendInput below it. Pinning keeps the window found under the "
-            "cursor when the run starts, so you can move the mouse and even "
-            "cover the window while it is clicked.",
+            "input near 6,000 CPS. Direct posts button messages to the window "
+            "and skips the input queue, but Windows caps a posted-message "
+            "queue at 10,000 and drops the rest. SYNC sends each click with "
+            "SendMessageTimeout instead: the window handles it before the "
+            "call returns, so nothing waits in that queue and every click is "
+            "registered - at the speed the window's own message handler can "
+            "run. AUTO uses SYNC above 6,000 CPS and SendInput below it. "
+            "Pinning keeps the window found under the cursor when the run "
+            "starts, so you can move the mouse and cover the window.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
             justify="left", wraplength=340,
         ).pack(anchor="w")
@@ -319,10 +326,20 @@ class SettingsDialog(tk.Toplevel):
             self.minimize_var,
             bg=COLORS["card"],
         ).pack(anchor="w", pady=4)
+        theme.CheckPill(
+            inner,
+            "Force the Python engine",
+            self.force_python_var,
+            bg=COLORS["card"],
+        ).pack(anchor="w", pady=4)
         theme.make_label(
             inner,
-            "ClickStorm asks Windows for a high-resolution timer only while clicking.",
+            "The Rust core is used when available and falls back to Python "
+            "automatically if it cannot start. Force Python to skip the "
+            "native DLL entirely. ClickStorm asks Windows for a "
+            "high-resolution timer only while clicking.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
+            justify="left", wraplength=340,
         ).pack(anchor="w", pady=(6, 0))
 
     def _build_data(self, parent):
@@ -517,6 +534,7 @@ class SettingsDialog(tk.Toplevel):
             performance_mode=bool(self.performance_var.get()),
             always_on_top=bool(self.topmost_var.get()),
             minimize_on_start=bool(self.minimize_var.get()),
+            force_python_engine=bool(self.force_python_var.get()),
             total_clicks=self._total_clicks,
         )
         # Write the file before the window closes. The old flow destroyed the

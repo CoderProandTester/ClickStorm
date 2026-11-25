@@ -419,7 +419,7 @@ class LogSlider(tk.Canvas):
         self,
         parent,
         minimum=1.0,
-        maximum=25_000.0,
+        maximum=100_000.0,
         value=500.0,
         command=None,
         bg=None,
@@ -528,7 +528,8 @@ class LogSlider(tk.Canvas):
             (100, "100"),
             (1000, "1K"),
             (10_000, "10K"),
-            (25_000, "MAX"),
+            (50_000, "50K"),
+            (100_000, "MAX"),
         ):
             if value > self.maximum:
                 continue

@@ -66,15 +66,28 @@ Verified 2026-11-25 against each project's repository:
                                                               be relicensed under
                                                               MIT.
 
+  Assassin654/           GPL-2.0        No - copyleft,        Background
+  AutoClicker                           incompatible with     "ghost click"
+                                        an MIT release        behaviour: button
+                                                              messages sent
+                                                              synchronously to a
+                                                              window. No code
+                                                              used; SYNC is an
+                                                              independent
+                                                              SendMessageTimeout
+                                                              design.
+
 Summary of the compatibility check:
 
   * MIT-licensed projects (ColibriTap, WinClicker): compatible in both
     directions. Their notices are honoured by the credit above.
   * Projects with no licence (local764larp/auto-clicker): not reusable. Only
     published numbers and ideas were taken, which does not copy the work.
-  * GPL-3.0 projects (Blur Auto Clicker): not compatible with an MIT
-    distribution. No code was taken; only non-copyrightable ideas such as
-    "offer a click limit" were used.
+  * GPL-3.0 projects (Blur Auto Clicker) and GPL-2.0 projects (Paul's
+    AutoClicker): not compatible with an MIT distribution. No code was taken;
+    only non-copyrightable behaviour and measurements were used. ClickStorm's
+    SYNC mode is an independent SendMessageTimeout implementation of the
+    synchronous-message idea, not a translation of that project.
 
 Deliberately not used: kernel-mode input drivers such as Interception
 (https://github.com/oblitum/Interception). They would add an
