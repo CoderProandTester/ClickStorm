@@ -144,8 +144,13 @@ jobs:
       - name: Build the installer
         shell: pwsh
         run: |
-          & "$env:ISCC" "/DMyAppArch=${{ matrix.arch }}" "/DMyAppVersion=${{ steps.version.outputs.version }}" "installer\ClickStorm.iss"
-          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+          $log = Join-Path $env:RUNNER_TEMP "iscc.log"
+          & "$env:ISCC" "/DMyAppArch=${{ matrix.arch }}" "/DMyAppVersion=${{ steps.version.outputs.version }}" "installer\ClickStorm.iss" 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content $log -Tail 12) -join "%0A"
+            Write-Host "::error title=Inno Setup failed::$tail"
+            throw "Inno Setup failed with exit code $LASTEXITCODE"
+          }
           $setup = "release\ClickStorm-Setup-${{ steps.version.outputs.version }}-${{ matrix.arch }}.exe"
           if (-not (Test-Path $setup)) { throw "Installer was not produced: $setup" }
           Write-Host "Built $setup"
