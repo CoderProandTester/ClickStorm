@@ -17,7 +17,7 @@ from . import APP_DATA_DIR
 from .engine import MAX_CLICKS, MAX_CPS, MAX_DURATION, MIN_CPS
 from .winapi import BUTTONS, HOTKEY_KEYS
 
-SETTINGS_VERSION = 4
+SETTINGS_VERSION = 5
 _GEOMETRY_RE = re.compile(r"^\d+x\d+([+-]\d+[+-]\d+)?$")
 
 #: Why the last :meth:`Settings.save` call failed, for the UI to show. Empty
@@ -121,8 +121,10 @@ class Settings:
 
         out.start_delay = number("start_delay", 0.0, 10.0)
         out.jitter_percent = number("jitter_percent", 0.0, 0.75)
+        # "auto" is no longer offered; an old AUTO value falls back to the
+        # SYNC default, which is what AUTO resolved to at these rates.
         out.delivery = choice(
-            "delivery", ("sendinput", "direct", "sync", "auto"), "sync"
+            "delivery", ("sendinput", "direct", "sync"), "sync"
         )
         out.pin_window = boolean("pin_window")
         out.position_mode = choice(
@@ -162,10 +164,13 @@ class Settings:
             out.hotkey_stop = "F9"
         if raw_version < 4:
             # Version 4 makes SYNC the default delivery. Only the untouched
-            # old SENDINPUT default is upgraded, so an explicit Direct, AUTO
-            # or SendInput choice is preserved.
+            # old SENDINPUT default is upgraded, so an explicit Direct or
+            # SendInput choice is preserved.
             if out.delivery == "sendinput":
                 out.delivery = "sync"
+        # Version 5 retires AUTO and caps the click rate at 5,000 CPS. The
+        # choice() above turns an old AUTO value into SYNC, and number()
+        # clamps a saved rate such as 25,000 down to the new maximum.
 
         if out.hotkey_start == out.hotkey_stop:
             out.hotkey_stop = defaults.hotkey_stop

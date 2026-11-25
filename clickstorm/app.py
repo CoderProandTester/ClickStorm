@@ -23,7 +23,6 @@ from .engine import (
     MAX_CLICKS,
     MAX_CPS,
     MIN_CPS,
-    SENDINPUT_CEILING_CPS,
 )
 from .settings import Settings, settings_path
 from .settings_dialog import SettingsDialog
@@ -465,9 +464,8 @@ class ClickStormApp:
             ("10", 10),
             ("100", 100),
             ("1K", 1000),
+            ("2K", 2000),
             ("5K", 5000),
-            ("10K", 10000),
-            ("25K", 25000),
             ("MAX", MAX_CPS),
         ):
             button = theme.PillButton(
@@ -1075,14 +1073,10 @@ class ClickStormApp:
 
     def _refresh_engine_strip(self) -> None:
         delivery = {
-            "sendinput": "SendInput, small adaptive batches",
+            "sync": "SendInput, one click per call",
+            "sendinput": "SendInput, one millisecond slot per call",
             "direct": "Direct posted window messages",
-            "sync": "Synchronous window messages (handled per click)",
-            "auto": (
-                "AUTO - Sync above "
-                f"{fmt_rate(SENDINPUT_CEILING_CPS)} CPS"
-            ),
-        }.get(self.settings.delivery, "Synchronous window messages")
+        }.get(self.settings.delivery, "SendInput, one click per call")
         position = (
             "Follow cursor"
             if self.settings.position_mode == "cursor"
@@ -1095,7 +1089,7 @@ class ClickStormApp:
         )
         pinned = (
             "  \u00b7  window pinned"
-            if self.settings.pin_window and self.settings.delivery != "sendinput"
+            if self.settings.pin_window and self.settings.delivery == "direct"
             else ""
         )
         core = getattr(self.engine, "core_name", "Python")
@@ -1124,7 +1118,6 @@ class ClickStormApp:
             delay_text = "instant start"
         mode = {
             "sync": "Sync",
-            "auto": "AUTO (sync) delivery",
             "direct": "Direct",
             "sendinput": "SendInput",
         }.get(self.settings.delivery, "Sync")
@@ -1177,23 +1170,12 @@ class ClickStormApp:
             slot_text = f"{batch} clicks every 1 ms slot"
         else:
             slot_text = f"1 click every {1000.0 / rate:,.2f} ms"
-        if rate > SENDINPUT_CEILING_CPS:
-            if self.settings.delivery == "sendinput":
-                text = (
-                    f"{slot_text}. SendInput tops out near "
-                    f"{fmt_rate(SENDINPUT_CEILING_CPS)} CPS here - set "
-                    "Delivery to SYNC or AUTO for the full rate."
-                )
-                color = COLORS["red"]
-            elif self.settings.delivery == "sync":
-                text = (
-                    f"{slot_text}, delivered synchronously - the window "
-                    "handles every click before the next one is sent."
-                )
-                color = COLORS["green"]
-            else:
-                text = f"{slot_text}, delivered over the direct path."
-                color = COLORS["green"]
+        if rate >= 4_000:
+            text = (
+                f"{slot_text}. At the 5,000 CPS cap; Windows injects up to "
+                "about 6,000 CPS, so this rate is reachable."
+            )
+            color = COLORS["amber"]
         elif rate > 2_000:
             text = f"{slot_text}. Very fast; apps that throttle input register fewer."
             color = COLORS["amber"]
@@ -1961,7 +1943,7 @@ class ClickStormApp:
                 self.stop_clicking()
 
     # The stop key and the ESC panic key have to work even when Tk is busy
-    # redrawing a 25,000 CPS dashboard or a modal dialog owns the event loop,
+    # redrawing a 5,000 CPS dashboard or a modal dialog owns the event loop,
     # so they are polled on their own daemon thread. The watcher never touches
     # Tk: a stop is written straight to the thread-safe engine, and the UI
     # catches up from the queue on its next tick.

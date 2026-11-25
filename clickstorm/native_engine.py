@@ -28,7 +28,6 @@ from .engine import (
     MAX_CPS,
     MAX_DURATION,
     MIN_CPS,
-    SENDINPUT_CEILING_CPS,
 )
 
 ABI_VERSION = 1

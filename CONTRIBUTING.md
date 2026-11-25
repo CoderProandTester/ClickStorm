@@ -65,17 +65,20 @@ properties when changing it:
 
 - **Never click on the UI thread.** Tk is only touched from the main thread;
   the worker communicates through `poll_events()` and `get_stats()`.
-- **Small `SendInput` arrays.** Large arrays make `SendInput` block while the
-  target drains its input queue, which shows up as a low click rate and a
-  sluggish STOP. Keep bursts small and adaptive.
-- **`auto` delivery must never click into nothing.** It picks synchronous
-  message delivery only above `SENDINPUT_CEILING_CPS` and only when a target
-  window resolves; otherwise it falls back to SendInput for that session.
-- **Message delivery must never hang the clicker.** SYNC uses
-  `SendMessageTimeout` with a bounded timeout; a timed-out release is posted so
-  the target cannot be left with the button down. Never replace it with a bare
-  `SendMessage`, and do not add `SMTO_ABORTIFHUNG` (it can fail without setting
-  `ERROR_TIMEOUT`, which would count an unprocessed click as delivered).
+- **One `SendInput` batch per millisecond slot.** SENDINPUT sends
+  `round(cps / 1000)` clicks per call (5 at 5,000 CPS), which is about 1,000
+  calls a second instead of 5,000. Do not go back to one call per click: the
+  system input thread cannot drain that and the delivered rate falls short of
+  the setting. SYNC deliberately stays at one click per call for
+  compatibility.
+- **SYNC and SENDINPUT must always use real input.** They call `SendInput`, so
+  every app and game registers the clicks. Never route them through window
+  messages: raw-input apps silently ignore `WM_*BUTTON*`, which is why the old
+  message-based SYNC was replaced in 4.6.1.
+- **Message delivery is DIRECT only, and it must never hang the clicker.**
+  DIRECT posts `WM_*BUTTON*` with `PostMessage`; it is asynchronous and a
+  target that falls behind can drop messages. A down that posts without its up
+  must retry the release so the button is never latched.
 - **The native fallback is a safety net, not a retry loop.** A native session
   that refuses to start, or errors before delivering any click, restarts once
   on the Python core under the same session id. An error after real work is
@@ -131,7 +134,8 @@ Then check the behaviour you touched manually:
 
 - Start/stop with the buttons and with **F5**/**F9** (including quick taps).
 - Click-target mode ends exactly on the target; duration mode ends on time.
-- Test at low (10 CPS), normal (500-1,000 CPS) and high (10,000+ CPS) rates.
+- Test at low (10 CPS), normal (500-1,000 CPS) and high (4,000-5,000 CPS)
+  rates; 5,000 is the cap.
 - Verify follow-cursor and fixed-point modes.
 - Confirm the app keeps its icon, DPI scaling and saved window geometry.
 
@@ -233,7 +237,7 @@ without creating a release.
 - Describe what changed, why, and how you tested it (Windows version and
   architecture included).
 - Include before/after CPS numbers for engine changes, and say which
-  delivery mode (SendInput, Direct, SYNC, AUTO) and target you measured.
+  delivery mode (SYNC, SENDINPUT, DIRECT) and target you measured.
 - Do not commit `dist/`, `build/`, `release/`, `.venv/` or `__pycache__`;
   `.gitignore` already excludes them.
 - Code style is PEP 8, 4-space indents, type hints on public functions and

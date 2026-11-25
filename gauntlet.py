@@ -1,9 +1,9 @@
-"""ClickStorm Gauntlet - a standalone 25,000+ CPS autoclicker.
+"""ClickStorm Gauntlet - a standalone autoclicker (5,000 CPS ceiling).
 
 A single-file console autoclicker for 64-bit Windows. It batches whole clicks
 into one pre-allocated ``SendInput`` array and paces batches against
-``perf_counter()``, so a 25,000 CPS target is 1,000 calls of 25 clicks per
-second instead of 25,000 separate calls.
+``perf_counter()``, so a 5,000 CPS target is 200 calls of 25 clicks per
+second instead of 5,000 separate calls.
 
 Architecture (the "Gauntlet Loop")
 ----------------------------------
@@ -24,9 +24,9 @@ Architecture (the "Gauntlet Loop")
 
 Usage
 -----
-    python gauntlet.py                    # 25,000 CPS, left button
-    python gauntlet.py --cps 5000         # slower target
-    python gauntlet.py --cps 0            # uncapped: send as fast as Windows takes it
+    python gauntlet.py                    # 5,000 CPS, left button
+    python gauntlet.py --cps 1000         # slower target
+    python gauntlet.py --cps 0            # uncapped: uses the 5,000 ceiling
     python gauntlet.py --batch 50         # 50 clicks (100 events) per call
 
 F6 arms and disarms. ESC stops the worker and exits. Clicks go to whatever is
@@ -152,9 +152,10 @@ THREAD_PRIORITY_ABOVE_NORMAL = 1
 VK_F6 = 0x75
 VK_ESCAPE = 0x1B
 
-__version__ = "4.6.0"  # keep in sync with clickstorm/__init__.py
+__version__ = "4.6.1"  # keep in sync with clickstorm/__init__.py
 
-DEFAULT_CPS = 25_000.0
+DEFAULT_CPS = 5_000.0
+MAX_CPS = 5_000.0
 DEFAULT_BATCH = 25
 MAX_BATCH = 500
 # Watchdog cadence (~66 Hz) and telemetry period.
@@ -164,9 +165,10 @@ TELEMETRY_SECONDS = 1.0
 # only the last stretch before the deadline is a pure spin. This keeps the
 # 1 ms cadence exact without burning a whole core for the whole batch period.
 SPIN_SECONDS = 0.0003
-# Batches are normally ~1 ms apart at 25,000 CPS. A deliberately low --cps
-# makes that gap much longer, so anything above this threshold waits on the
-# arm event instead of spinning for seconds (still interruptible by F6/ESC).
+# Batches are normally a few milliseconds apart at the 5,000 CPS cap. A
+# deliberately low --cps makes that gap much longer, so anything above this
+# threshold waits on the arm event instead of spinning for seconds (still
+# interruptible by F6/ESC).
 LONG_WAIT_SECONDS = 0.004
 # Give up on a target that refuses every event for this many batches in a row
 # instead of spinning on a dead input queue.
@@ -510,7 +512,8 @@ def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
         prog="gauntlet.py",
         description=(
-            "Standalone 25,000+ CPS autoclicker (SendInput batch engine). "
+            "Standalone autoclicker (SendInput batch engine, 5,000 CPS "
+            "ceiling). "
             "F6 arms/disarms, ESC stops and exits."
         ),
         epilog=(
@@ -522,7 +525,7 @@ def _parse_args(argv=None):
         "--cps",
         type=float,
         default=DEFAULT_CPS,
-        help="target clicks per second; 0 = uncapped (default 25000)",
+        help="target clicks per second; 0 = the 5,000 ceiling (default 5000)",
     )
     parser.add_argument(
         "--batch",
@@ -546,14 +549,14 @@ def _parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = _parse_args(argv)
-    target = args.cps if args.cps > 0.0 else DEFAULT_CPS
+    target = min(MAX_CPS, args.cps) if args.cps > 0.0 else DEFAULT_CPS
     button = args.button.capitalize()
     shared = SharedGauntlet.create(cps=target, button=button)
     if shared is not None:
         gauntlet = shared
         backend = "shared ClickStorm engine (native core when present)"
     else:
-        gauntlet = Gauntlet(cps=args.cps, batch=args.batch, button=args.button)
+        gauntlet = Gauntlet(cps=target, batch=args.batch, button=args.button)
         backend = "embedded fallback (ClickStorm package not found)"
 
     print(f"ClickStorm Gauntlet {__version__} - one click engine")
@@ -574,7 +577,7 @@ def main(argv=None) -> int:
             f"({gauntlet._event_count} input events) per SendInput call"
         )
     if shared is not None:
-        note = "" if args.cps > 0.0 else "  (uncapped maps to the 100,000 ceiling)"
+        note = "" if args.cps > 0.0 else "  (uncapped maps to the 5,000 ceiling)"
         print(f"  target      {_format_rate(target)} CPS, paced by the engine{note}")
     elif target > 0.0:
         per_second = gauntlet.cps / gauntlet.batch

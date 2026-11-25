@@ -2,8 +2,8 @@
 
 A fast Windows auto clicker with one unified engine and a pure Tkinter
 interface. The engine keeps one pre-allocated `INPUT` batch, paces clicks
-against a monotonic clock and delivers them through synchronous or posted
-window messages or Win32 `SendInput`. The native Rust core
+against a monotonic clock and injects them as real mouse input with Win32
+`SendInput` (or posts button messages in DIRECT mode). The native Rust core
 (`native/clickstorm-engine`) runs that hot loop outside the Python
 interpreter, and the identical Python core takes over automatically when the
 DLL cannot, so a source run needs no toolchain and there is no engine to
@@ -38,9 +38,9 @@ with Start-menu shortcuts and an entry in Settings → Apps.
 
 ## Features
 
-- Click rates from 1 to **100,000 CPS**, with a logarithmic slider, presets
+- Click rates from 1 to **5,000 CPS**, with a logarithmic slider, presets
   and a numeric entry. The gauge always reports what the target actually
-  accepted, so an unreachable setting settles at the real ceiling.
+  accepted, so a throttled target settles at its real ceiling.
 - **One ultimate engine.** Pacing, adaptive batching, `SendInput` and message
   delivery run in `clickstorm_engine.dll` (Rust, no external crates); Python
   only configures a session and reads counters, so there is no interpreter or
@@ -60,27 +60,25 @@ with Start-menu shortcuts and an entry in Settings → Apps.
   while clicking.
 - Optional timing jitter, 0-5 s start delay, always-on-top and
   minimize-on-start.
-- Clock-based pacing: credit accrues against `perf_counter()`, so 25,000 CPS
-  owes 25 clicks per millisecond of real time and 500 CPS owes one click every
+- Clock-based pacing: credit accrues against `perf_counter()`, so 5,000 CPS
+  owes 5 clicks per millisecond of real time and 500 CPS owes one click every
   2 ms. Fractional rates such as 1,234 CPS stay exact, and a late wake-up is
   repaid instead of losing clicks.
-- Small adaptive `SendInput` calls: one click per call at first, widening only
-  while calls stay far cheaper than a slot, because wide arrays are measurably
-  slower once an app throttles input.
-- Four delivery modes, defaulting to **SYNC**: **SYNC** uses
-  `SendMessageTimeout` so the window handles each click before the call
-  returns and nothing waits in a queue; **SendInput**, which every app and
-  game accepts but Windows caps at roughly 6,000-7,000 CPS here; **direct
-  window messages**, which skip the system input queue but are still
-  asynchronous and capped by the 10,000-message posted queue; and **AUTO**,
-  which uses SendInput up to 6,000 CPS and SYNC above it. SYNC is the path
-  that can genuinely register rates above 25,000 in a Win32 window that
-  handles button messages quickly, and it falls back to SendInput when there
-  is no other window under the cursor to receive the messages.
-- Optional **pinned window** (background) clicking: with Direct, SYNC or
-  AUTO, the window under the cursor is resolved once when the run starts and
-  clicked by handle from then on, so the cursor can move and the window can
-  be covered.
+- Batched `SendInput`: SENDINPUT carries one millisecond of clicks per call
+  (5 clicks at 5,000 CPS), so the system input thread is not asked to drain
+  5,000 separate calls a second. SYNC keeps one click per call for maximum
+  compatibility.
+- Three delivery modes, defaulting to **SYNC**. **SYNC** and **SENDINPUT**
+  inject real mouse input, which every app and game registers: SYNC sends one
+  complete click per call for maximum compatibility, while SENDINPUT batches
+  one millisecond of clicks per call for maximum delivered speed. **DIRECT**
+  posts `WM_*BUTTON*` messages to the window under the cursor: it can click a
+  covered window and is not bounded by the input thread, but games and
+  raw-input apps ignore posted messages and Windows caps the posted queue near
+  10,000 messages.
+- Optional **pinned window** (background) clicking in DIRECT mode: the window
+  under the cursor is resolved once when the run starts and clicked by handle
+  from then on, so the cursor can move and the window can be covered.
 - Live stats: actual CPS, peak CPS, rate history, progress, ETA, batches,
   input events and failed events.
 - **UPDATES** button: checks the latest GitHub release, lists the installers it
@@ -113,15 +111,15 @@ separate implementations. The single-file release asset keeps a compact
 embedded fallback so it still starts on a machine without the package, but
 that fallback is never used when ClickStorm is available.
 
-`--batch` only applies to the embedded fallback; the shared engine chooses the
-batch size adaptively because wide `SendInput` calls are slower once a target
-throttles input.
+`--batch` only applies to the embedded fallback; the shared engine picks the
+batch size from the rate. The console tool uses the same 5,000 CPS ceiling as
+the app.
 
 ```bat
-python gauntlet.py                 :: 25,000 CPS, left button, 25 clicks per call
-python gauntlet.py --cps 5000
-python gauntlet.py --cps 0         :: uncapped: send as fast as Windows accepts
-python gauntlet.py --batch 50 --button right
+python gauntlet.py                 :: 5,000 CPS, left button
+python gauntlet.py --cps 1000
+python gauntlet.py --cps 0         :: uncapped: uses the 5,000 ceiling
+python gauntlet.py --batch 25 --button right
 ```
 
 **F6** arms and disarms, **ESC** stops the worker and exits. The console prints
@@ -137,8 +135,8 @@ cadence is exact without pegging a core. Batches are sent through one
 to catch the classic 32-byte union mistake that makes `SendInput` return 0.
 
 Like every `SendInput` tool, what the target *receives* is capped by Windows
-(roughly 6,000-7,000 CPS into most apps), even though the sender can emit
-25,000. Run it from an Administrator terminal when the target window is
+(roughly 6,000-7,000 CPS into most apps), even though the sender may target
+5,000. Run it from an Administrator terminal when the target window is
 elevated; Windows UIPI blocks injected input across integrity levels.
 
 ## Build the executable
@@ -227,7 +225,7 @@ anything silently.
 
 Hotkeys work while the window is unfocused. They are polled on a dedicated
 daemon thread (`GetAsyncKeyState`) rather than the Tk event loop, so a stop
-lands even while the dashboard is redrawing at 25,000 CPS or a settings dialog
+lands even while the dashboard is redrawing at 5,000 CPS or a settings dialog
 is open. A stop is written straight to the thread-safe engine, so it does not
 wait for the UI either. The stop key always wins, and both keys can be changed
 under **Settings → Global hotkeys**; **ESC** is fixed and is never disabled.
@@ -237,24 +235,22 @@ limit expires, or when you press stop. In unlimited mode only stop ends a run.
 
 ## How the speed works
 
-- **Small adaptive `SendInput` calls.** The `INPUT` array is built once per
-  session and reused, so the hot loop never allocates, and a call carries a
-  single click (DOWN + UP) at first. It widens to 2, 4 ... 16 clicks only
-  while a call stays far cheaper than a 1 ms slot, and narrows again the
-  moment a call gets slow or Windows rejects part of it. A 2-event call costs
-  about 20 us, while a 50-event call can cost milliseconds because `SendInput`
-  waits for the receiving app to drain its input queue - so wide batches lower
-  the delivered rate instead of raising it.
+- **Batched `SendInput` calls.** The `INPUT` array is built once per session
+  and reused, so the hot loop never allocates. SENDINPUT carries one
+  millisecond of clicks per call (5 clicks at 5,000 CPS), which is about
+  1,000 calls a second instead of 5,000: the system input thread and the
+  target's message loop both keep up at that rate. SYNC sends one complete
+  click per call for apps that mishandle batched DOWN/UP pairs, and a slow or
+  partially rejected call narrows the batch.
 - **A higher-priority process.** While a session runs, both the click thread
   and the process class are raised so the click stream is not preempted by
   background work, then both are restored when the run ends.
 - **Millisecond batching math.** The target is converted to clicks per
-  millisecond (`cps / 1000`, so 25,000 CPS is 25 clicks/ms). The fractional
+  millisecond (`cps / 1000`, so 5,000 CPS is 5 clicks/ms). The fractional
   part is carried in a float bank, so a rate like 1,234 CPS (1.234 clicks/ms)
   averages exactly 1,234 CPS instead of drifting.
 - **Time-based catch-up.** Credit is accrued from `perf_counter()` deltas
-  rather than from a fixed tick, so a late wake-up is repaid on the next turn
-  (a 2 ms hiccup at 25,000 CPS owes 50 clicks) and fractional rates never
+  rather than from a fixed tick, so a late wake-up is   repaid on the next turn (a 2 ms hiccup at 5,000 CPS owes 10 clicks) and fractional rates never
   drift. Backlog is capped at 20 ms of the target rate, so a target faster
   than the machine can deliver degrades into a steady stream at the real
   ceiling instead of a giant burst that makes the run look frozen.
@@ -273,8 +269,8 @@ limit expires, or when you press stop. In unlimited mode only stop ends a run.
   click; SendInput clicks at the current position (fixed mode returns the
   cursor to its point once per slot).
 - **Pinned target for message delivery.** With **Pin the window under the
-  cursor** enabled, the Direct and SYNC paths resolve the window handle once
-  at the start of the run and send to it for the whole session. That removes
+  cursor** enabled, the DIRECT path resolves the window handle once at the
+  start of the run and sends to it for the whole session. That removes
   the per-batch `GetCursorPos` + `WindowFromPoint` + `ScreenToClient` work and
   lets the target be moved or covered. Windows that belong to ClickStorm
   itself are never used as a target, so a run started from the START button
@@ -291,78 +287,67 @@ ClickStorm 4.0.1 clicking into a window that counted every click it received:
 | --- | --- | --- |
 | 1,000 CPS | 999 CPS | - |
 | 5,000 CPS | 4,981 CPS | - |
-| 10,000 CPS | 6,194 CPS | 9,988 CPS |
-| 20,000 CPS | 5,820 CPS | 19,962 CPS |
-| 25,000 CPS | 6,052 CPS | 24,945 CPS |
 
 The sending side is not the limit: measured against a null sink that accepts
-every event instantly, this engine emits **~24,900 CPS** at a 25,000 target.
-`SendInput` - what games and normal apps expect - tops out at roughly
-**6,000-7,000 CPS** on this machine. Above that Windows still accepts the
-events, but the target's message loop cannot consume them, which is why a
-25,000 CPS SendInput target reads around 6,000 CPS on the live gauge. Direct
-delivery skips the system input queue by posting
-`WM_LBUTTONDOWN`/`WM_LBUTTONUP` straight to the window and reaches
-**~25,000 CPS**, but only apps that act on posted messages respond to it (many
-games ignore them and only move the cursor, so SendInput stays the default).
+every event instantly, this engine emits well above the 5,000 cap. Windows
+injects `SendInput` at roughly **6,000-7,000 CPS** into most apps on this
+machine, so a 5,000 target is reachable, but it sits close to the wall. A
+target that throttles input settles at whatever it can consume, and the live
+gauge reports that number.
 
-Version 4.0.0 replaced the wide catch-up bursts of earlier builds (16 clicks
-per call, growing to 64) with small adaptive calls: on the same machine, a
-5,000 CPS target delivered about **166 CPS** before that change and about
-**4,980 CPS** after it.
+Version 4.6.1 changed two things about delivery. SENDINPUT now sends one
+millisecond of clicks per call instead of one click per call: at 5,000 CPS
+that is 5 clicks and about 1,000 calls a second, instead of 5,000 two-event
+calls the system input thread cannot drain fast enough. SYNC now injects real
+mouse input too - one complete click per call - because message-only clicks
+were silently ignored by games, Electron apps and other raw-input targets.
 
-### What "25,000 CPS" can and cannot mean
+### What "5,000 CPS" can and cannot mean
 
-A clicker can *emit* 25,000 clicks a second; the numbers above are what the
+A clicker can *emit* 5,000 clicks a second; the numbers above are what the
 receiving window actually **received**. Only the second number matters.
 
-- **`SendInput` has a hard user-mode ceiling.** Microsoft documents that the
-events are inserted into the input stream *serially*, and Windows hands them
-to one system input thread before the target's message loop sees them. On the
-machine measured here that tops out around **6,000-7,000 delivered CPS** no
-matter how many events are batched into a call.
-- **Wider batches do not bypass it.** A GitHub autoclicker claiming 100,000
-CPS from arrayed `SendInput` is counting events handed to the OS queue, not
-clicks the target processed. Once that queue is saturated the receiving app
-consumes at its own rate and the rest is coalesced or dropped.
-- **Posted messages do skip the input queue**, which is why the Direct/AUTO
-path can make a normal Win32 window count about **25,000 CPS**. Games read
-raw input or DirectInput, ignore posted messages, and still act once per
-frame; posted clicks are not a way to make a game see 25,000 real mouse
-clicks.
+- **`SendInput` has a practical user-mode ceiling.** Microsoft documents that
+  the events are inserted into the input stream *serially*, and Windows hands
+  them to one system input thread before the target's message loop sees them.
+  On the machine measured here that tops out around **6,000-7,000 delivered
+  CPS**, which is why 5,000 is the highest setting the app offers.
+- **Batching helps; it does not bypass the ceiling.** Sending a millisecond of
+  clicks per call removes per-call overhead, but once the input queue is
+  saturated the receiving app consumes at its own rate and the rest is
+  coalesced or dropped.
+- **Posted messages do skip the input queue**, which is why DIRECT can make a
+  normal Win32 window count more than `SendInput` can. Games read raw input or
+  DirectInput, ignore posted messages, and still act once per frame; posted
+  clicks are not a way to make a game see real mouse clicks.
 - **Kernel drivers are not a shortcut.** Interception or a virtual HID device
-needs an administrator-installed signed driver, and the target still has to
-process the input. A game at 240 fps cannot act on more than 240 clicks a
-second, and a physical 1 kHz mouse cannot report more than 1,000 clicks a
-second in the first place.
+  needs an administrator-installed signed driver, and the target still has to
+  process the input. A game at 240 fps cannot act on more than 240 clicks a
+  second, and a physical 1 kHz mouse cannot report more than 1,000 clicks a
+  second in the first place.
 - **Nothing here fabricates the number.** The gauge counts only events Windows
-accepted (`SendInput`'s return value) or messages successfully queued
-(`PostMessage`'s return value). A 25,000 target that reads 6,000 is Windows
-refusing the rest, not a rounding error.
+  accepted (`SendInput`'s return value) or messages successfully queued
+  (`PostMessage`'s return value). A 5,000 target that reads 3,000 is the
+  target refusing the rest, not a rounding error.
 
 `tools/click_counter.py` is a separate window that counts the button messages
 it receives and shows live delivered CPS. Point ClickStorm at it to measure
 your own machine with any delivery mode.
 
-### Synchronous delivery: registering more than 25,000
+### Delivery modes
 
-Posted messages are asynchronous. They wait in a per-window queue that Windows
-caps at 10,000 messages, so a target that falls behind loses the surplus even
-though `PostMessage` reported success. **SYNC** does not post: it calls
-`SendMessageTimeoutW`, which runs the target's window procedure before the
-call returns. A click is handled, not queued, so the delivered count matches
-the sent count up to the speed of the target's own handler, and a 25,000+
-setting can be registered by a Win32 window that processes button messages
-quickly.
+**SYNC** (the default) and **SENDINPUT** both use `SendInput`, so the target
+receives real mouse input exactly like a physical mouse. SYNC puts one
+complete DOWN/UP pair in each call, which is the most compatible form and the
+one to use when a game or app misses clicks. SENDINPUT batches one millisecond
+of clicks per call for maximum delivered speed at high rates. Neither mode
+needs a window under the cursor: they click wherever the pointer is.
 
-Each send has a 20 ms timeout, so a hung window cannot freeze the clicker, and
-a timed-out release is posted so the button never latches. This is the same class of idea as the background "ghost click" mode
-in [Assassin654/AutoClicker](https://github.com/Assassin654/AutoClicker):
-synchronous button messages to a chosen window. ClickStorm's implementation is
-independent, written in Rust, and adds timeouts/hang protection; no code was
-copied or translated. Games that read raw input or DirectInput still ignore
-these messages, so SYNC raises registered clicks in classic Win32 apps, not in
-games.
+**DIRECT** posts `WM_LBUTTONDOWN`/`WM_LBUTTONUP` straight to the window under
+the cursor and can pin that window, so the cursor can move or the window can
+be covered. Posted messages are asynchronous and wait in a per-window queue
+that Windows caps near 10,000 messages, and games or raw-input apps ignore
+them. DIRECT is for classic Win32 windows that act on button messages.
 
 ### Why more threads do not help
 
@@ -373,11 +358,9 @@ returns zero when "the input was already blocked by another thread". Every
 sender therefore queues behind the same system input path and the same
 target message loop, so N threads contend rather than add throughput, and
 they can also interleave DOWN/UP pairs, leaving a button latched. What does
-work is not pushing the input through that path at all: window messages do,
-which is why the Direct, SYNC and AUTO delivery modes reach the full rate
-where a window accepts them. SYNC additionally makes the target handle each
-click before the call returns, so the posted queue's 10,000-message cap no
-longer limits what is registered.
+work is not pushing the input through that path at all: posted window messages
+do, which is why DIRECT can deliver more than `SendInput` to a window that
+acts on them.
 
 Above the ceiling, any setting behaves as a "run as fast as this app allows"
 value: the live CPS readout shows what actually reached the target. Games and
@@ -394,7 +377,7 @@ Windows clickers are built and what they measured. Credit to those projects:
 | [local764larp/auto-clicker](https://github.com/local764larp/auto-clicker) | none declared | The delivered-versus-emitted CPS benchmark that shows wide `SendInput` batches lose delivered clicks, and the timer / yield / spin wait tiers. Measurements and design ideas only. |
 | [chris101-dev/ColibriTap](https://github.com/chris101-dev/ColibriTap) | MIT | Drift-free pacing against an absolute deadline on a monotonic clock instead of `sleep(interval)`. |
 | [PriyanshuGeTRekT/WinClicker](https://github.com/PriyanshuGeTRekT/WinClicker) | MIT | Clicking a window in the background with posted button messages (the **Direct message** delivery mode). |
-| [Assassin654/AutoClicker](https://github.com/Assassin654/AutoClicker) | GPL-2.0 | Behaviour and measurements only. Its background "ghost click" mode sends button messages synchronously to a chosen window, which is why **SYNC** exists. ClickStorm implements the idea independently with `SendMessageTimeoutW`, hang protection and a Rust core; no code was copied, translated or adapted. |
+| [Assassin654/AutoClicker](https://github.com/Assassin654/AutoClicker) | GPL-2.0 | Behaviour and measurements only. Its background "ghost click" mode sends button messages to a chosen window; ClickStorm evaluated that idea, then made SYNC real input in 4.6.1 because raw-input apps ignore messages. No code was copied, translated or adapted. |
 | [Blur009/Blur-AutoClicker](https://github.com/Blur009/Blur-AutoClicker) | GPL-3.0 | Feature ideas only (click/time limits, position clicking). No code is reused, because GPL-3.0 is not compatible with this project's MIT licence. |
 
 No source code was copied from any of these projects. Where a licence would
@@ -416,10 +399,10 @@ driver and would end the "single portable exe, no dependencies" promise.
 Settings are written atomically. An older settings file is migrated on load
 (version 2 moves the default start hotkey to `F5` and caps the click target at
 25,000; version 4 makes SYNC the default delivery and drops the old Force
-Python flag, upgrading only an untouched SendInput default). Missing keys
-take safe defaults, so upgrading never resets an existing file. The settings
-window writes this file when SAVE is pressed and shows the exact path in its
-footer.
+Python flag; version 5 retires AUTO and clamps a saved rate to 5,000 CPS).
+Missing keys take safe defaults, so upgrading never resets an existing file.
+The settings window writes this file when SAVE is pressed and shows the exact
+path in its footer.
 
 ## Contributing
 
@@ -434,7 +417,7 @@ MIT. See [LICENSE](LICENSE).
 
 ```
 clickstorm.py            Entry point (used by AutoClicker.spec)
-gauntlet.py             Standalone console Gauntlet autoclicker (25,000+ CPS)
+gauntlet.py             Standalone console Gauntlet autoclicker (up to 5,000 CPS)
 native/clickstorm-engine/ Rust click core: pacing, batching, SendInput, direct
 clickstorm/native_engine.py  ctypes binding to the Rust core
 clickstorm/app.py        Main window, hotkeys, session control
@@ -460,21 +443,14 @@ installer/ClickStorm.iss Inno Setup installer recipe
 - **Stopping feels delayed at extreme rates.** Stop is checked on every 1 ms
   slot and every `SendInput` call, but a backed-up input queue can still take
   a moment to drain.
-- **25,000 CPS reads around 6,000 CPS actual.** That is the `SendInput`
-  ceiling: Windows serialises injected input through one system input thread,
-  so it delivers roughly 6,000-7,000 clicks per second here no matter how high
-  the target is. No user-mode clicker can change that, and wider batches only
-  fill the queue. Delivery now defaults to **SYNC** (AUTO is the alternative):
-  synchronous messages bypass both the input thread and the posted-message
-  queue, so a Win32 window that handles button messages quickly registers
-  every click. Games and raw-input apps ignore them. Use
-  `tools/click_counter.py` to see what a target really receives.
-- **SYNC clicks do nothing in a game or a custom-drawn window.** Those apps do
-  not act on `WM_*BUTTON*` messages; they read raw input. Use SendInput there
-  and expect the ~6,000 CPS Windows ceiling.
-- **SYNC reports timeouts.** The target's window procedure is busy or not
-  pumping messages. Each send gives up after 20 ms; lower the rate or use
-  Direct/SendInput for that window.
+- **5,000 CPS reads lower in a busy app.** Windows injects `SendInput`
+  through one system input thread at roughly 6,000-7,000 clicks per second,
+  and the target's own loop has to consume them. Try SENDINPUT for the fastest
+  real input, or lower the rate; `tools/click_counter.py` shows what the
+  target really receives.
+- **DIRECT clicks do nothing in a game or a custom-drawn window.** Those apps
+  do not act on `WM_*BUTTON*` messages; they read raw input. Use SYNC or
+  SENDINPUT there.
 - **The update reported a missing module.** 4.0.1 starts the downloaded
   installer without inheriting the windowed app's absent std handles (that
   call was the failure), and every update failure is now written to

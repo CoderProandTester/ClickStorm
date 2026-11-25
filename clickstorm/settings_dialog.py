@@ -274,16 +274,15 @@ class SettingsDialog(tk.Toplevel):
         inner = self._section(
             parent,
             "Delivery",
-            "SYNC is the default: the target handles each click before the "
-            "next one is sent, so nothing waits in a queue.",
+            "SYNC is the default: every click is injected as a real mouse "
+            "event, so apps and games register it.",
         )
         self.delivery_segment = theme.SegmentedControl(
             inner,
             options=(
                 ("sync", "SYNC"),
-                ("auto", "AUTO"),
-                ("direct", "DIRECT"),
                 ("sendinput", "SENDINPUT"),
+                ("direct", "DIRECT"),
             ),
             variable=self.delivery_var,
             bg=COLORS["card"],
@@ -296,16 +295,16 @@ class SettingsDialog(tk.Toplevel):
         self.delivery_segment.pack(anchor="w", pady=(9, 6))
         theme.CheckPill(
             inner,
-            "Pin the window under the cursor",
+            "Pin the window under the cursor (DIRECT only)",
             self.pin_window_var,
             bg=COLORS["card"],
         ).pack(anchor="w", pady=(0, 6))
         theme.make_label(
             inner,
-            "AUTO uses SYNC above 6,000 CPS and SendInput below. DIRECT posts "
-            "button messages and skips the input queue, but Windows caps a "
-            "posted queue near 10,000. SENDINPUT works with everything, but "
-            "Windows caps injected input near 6,000 CPS.",
+            "SYNC sends one click per call, the most compatible real input. "
+            "SENDINPUT batches a millisecond of clicks per call for maximum "
+            "delivered speed. DIRECT posts button messages instead: it can "
+            "click a covered window, but games and raw-input apps ignore it.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
             justify="left", wraplength=360,
         ).pack(anchor="w")

@@ -3,7 +3,7 @@
 Pacing model
 ------------
 The configured rate is a per-second target.  One second is 1,000 ms, so the
-engine works in clicks per millisecond (``cps / 1000``): 25,000 CPS is 25
+engine works in clicks per millisecond (``cps / 1000``): 5,000 CPS is 5
 clicks for every one of the 1,000 slots in a second, and 500 CPS is half a
 click per slot.  Credit is accrued against the real clock (``perf_counter``)
 as a float, so fractional rates such as 1,234 CPS (1.234 clicks/ms) keep their
@@ -22,13 +22,18 @@ process.
 
 Delivery
 --------
-Measured on Windows, one ``SendInput`` call carrying a single click (2 events)
-costs roughly 20 us, while a call carrying 25 clicks (50 events) can take
-milliseconds because the call waits for the receiving application to drain
-the input queue.  Wide batches therefore *lower* delivered CPS, so the engine
-sends a deliberately small batch per call (one click at first) and only widens
-it while calls stay far cheaper than a slot; a slow or partially rejected call
-immediately narrows it again.
+SYNC and SENDINPUT both inject real mouse input with ``SendInput``, so every
+application and game registers them.  SYNC puts exactly one complete click in
+each call, the most compatible form.  SENDINPUT carries one millisecond slot
+of clicks per call (5 clicks at 5,000 CPS, so about 1,000 calls a second
+instead of 5,000), which is what lets the injected rate actually reach the
+cap.  A slow or partially rejected call narrows the batch again.
+
+DIRECT is the only message path: it posts ``WM_*BUTTON*`` to the window under
+the cursor.  Posted messages skip the system input queue, but applications
+that read raw input (most games) ignore them and Windows caps the posted queue
+at 10,000 messages, so DIRECT suits classic Win32 windows that answer button
+messages.
 
 Backlog
 -------
@@ -56,22 +61,13 @@ from . import winapi
 
 
 MIN_CPS = 1.0
-# SendInput injects through one system input thread and tops out well below
-# this. Posted or synchronous window messages skip that thread and can be
-# consumed faster, so the target now runs to 100,000 CPS: the engine still
-# reports what the target accepted, and an unreachable target simply settles
-# at its real ceiling instead of being artificially capped at 25,000.
-MAX_CPS = 100_000.0
+# Windows injects SendInput events through one system input thread and lands
+# around 6,000-7,000 delivered CPS before the receiving app becomes the limit,
+# so the app never offers more than 5,000: a higher setting would only make
+# the live gauge disagree with what the target actually receives.
+MAX_CPS = 5_000.0
 MAX_CLICKS = 25_000
 MAX_DURATION = 86_400.0
-
-# Real injected input cannot go faster than this: SendInput hands every event
-# to one system input thread and then to the target's message loop, and
-# measured ceilings on fast desktops land around 6,000-7,000 delivered CPS no
-# matter how fast the sender is. Posted window messages skip that thread, so
-# they do reach the requested rate. "auto" delivery therefore uses SendInput
-# up to this rate and posted messages above it.
-SENDINPUT_CEILING_CPS = 6_000.0
 
 # The scheduling grid. One slot is one millisecond, so a CPS value divided by
 # 1000 is exactly the number of clicks that belongs to one slot.
@@ -82,13 +78,11 @@ TICK_SECONDS = 0.001
 # a running session look frozen.
 MAX_BACKLOG_MS = 20.0
 # Reusable INPUT arrays are sized for this many clicks and never reallocated.
-# Small batches are faster than wide ones once the receiving app throttles
-# input, so the array covers the growth ceiling only. The batch starts at the
-# number of clicks one 1 ms slot carries (25 at 25,000 CPS), which is one
-# SendInput call per slot instead of 25 queue-blocking calls.
+# A call carries one 1 ms slot of clicks (5 at 5,000 CPS), so the hot loop
+# makes about 1,000 calls a second instead of 5,000 queue-blocking two-event
+# calls. SYNC deliberately stays at one click per call.
 MAX_CHUNK_CLICKS = 32
 MIN_CHUNK_CLICKS = 1
-INITIAL_CHUNK_CLICKS = 1
 # Posted window messages never wait for the system input queue, so direct
 # delivery can carry a much wider batch per call.
 DIRECT_CHUNK_CLICKS = 256
@@ -111,7 +105,7 @@ class EngineConfig:
     limit_mode: str = "unlimited"  # unlimited | clicks | duration
     click_limit: int = 5_000
     duration: float = 10.0
-    delivery: str = "sendinput"  # sendinput | direct | sync | auto
+    delivery: str = "sync"  # sync | sendinput | direct
     pin_window: bool = False
     jitter_percent: float = 0.0
     position_mode: str = "cursor"  # cursor | fixed
@@ -125,10 +119,16 @@ class EngineConfig:
         duration = max(0.05, min(MAX_DURATION, float(self.duration)))
         jitter = max(0.0, min(0.75, float(self.jitter_percent)))
         button = self.button if self.button in winapi.BUTTONS else "Left"
+        # "auto" was retired when the cap dropped below the SendInput
+        # ceiling: every old AUTO configuration now means SYNC.
         delivery = (
-            self.delivery
-            if self.delivery in ("sendinput", "direct", "sync", "auto")
-            else "sendinput"
+            "sync"
+            if self.delivery == "auto"
+            else (
+                self.delivery
+                if self.delivery in ("sendinput", "direct", "sync")
+                else "sync"
+            )
         )
         position = (
             self.position_mode if self.position_mode in ("cursor", "fixed") else "cursor"
@@ -405,20 +405,10 @@ class ClickEngine:
             fixed_x = fixed_y = 0
 
         delivery = config.delivery
-        if delivery == "auto":
-            # Choose the path that can register the requested rate: SendInput
-            # is capped by Windows; synchronous window messages skip both the
-            # input thread and the posted-message queue.
-            delivery = (
-                "sync"
-                if config.cps > SENDINPUT_CEILING_CPS
-                else "sendinput"
-            )
-
         direct_target = None
         direct_point = None
         pinned = False
-        if delivery in ("direct", "sync"):
+        if delivery == "direct":
             point = self._point(config, fixed_x, fixed_y)
             if point is not None:
                 # Requested pinning is remembered even when nothing was found
@@ -434,23 +424,12 @@ class ClickEngine:
                     # target can even be covered by another window.
                     winapi.focus_target(direct_target)
                 direct_point = point
-            if (
-                direct_target is None
-                and not config.pin_window
-                and config.delivery in ("auto", "sync")
-            ):
-                # Nothing of another process is under the cursor (for example
-                # the cursor is over ClickStorm itself). AUTO and SYNC are
-                # message paths, and without a window they would click into
-                # nothing, so use the universally compatible path instead. An
-                # explicitly pinned window keeps reporting the pinned hint.
-                delivery = "sendinput"
 
         # Built once per session. Every SendInput call reuses this array and
         # simply passes a smaller event count, so the loop never allocates.
         click_array = (
             winapi.build_click_inputs(config.button, MAX_CHUNK_CLICKS)
-            if delivery == "sendinput"
+            if delivery != "direct"
             else None
         )
 
@@ -461,21 +440,26 @@ class ClickEngine:
         # a steady stream at the machine's real ceiling instead of stalling.
         backlog_cap = max(1.0, cps_per_ms * MAX_BACKLOG_MS)
         jitter = config.jitter_percent
-        slot_clicks = int(cps_per_ms + 0.5)
+        slot_clicks = max(1, min(MAX_CHUNK_CLICKS, int(cps_per_ms + 0.5)))
         if click_array is not None:
-            # A SendInput call waits for the target to drain its input queue,
-            # so a wide call is slower than a narrow one: start at a single
-            # click and let the adaptive growth widen it only when that is
-            # actually cheap.
-            chunk_limit = MAX_CHUNK_CLICKS
-            chunk = INITIAL_CHUNK_CLICKS
+            if delivery == "sync":
+                # SYNC is the compatibility path: one complete click per
+                # SendInput call, so even a target that mishandles a batched
+                # DOWN/UP pair sees every click.
+                chunk_limit = MIN_CHUNK_CLICKS
+                chunk = MIN_CHUNK_CLICKS
+            else:
+                # SENDINPUT sends one millisecond slot of clicks per call.
+                # At 5,000 CPS that is 5 clicks and about 1,000 calls a
+                # second, instead of 5,000 two-event calls the system input
+                # thread cannot drain fast enough to reach the target rate.
+                chunk_limit = slot_clicks
+                chunk = slot_clicks
         else:
             # Posted messages skip the input queue, so direct delivery can
-            # start at the clicks one slot carries (25 at 25,000 CPS).
+            # start at the clicks one slot carries.
             chunk_limit = DIRECT_CHUNK_CLICKS
-            chunk = max(
-                INITIAL_CHUNK_CLICKS, min(chunk_limit, max(1, slot_clicks))
-            )
+            chunk = max(MIN_CHUNK_CLICKS, min(chunk_limit, slot_clicks))
         clean_bursts = 0
         failures = 0
         credit = 0.0
@@ -520,11 +504,12 @@ class ClickEngine:
                     self._dropped_clicks += int(credit - backlog_cap)
                     credit = backlog_cap
 
-                if credit < 1.0:
-                    # Nothing is due yet. Sleep until the next whole click
-                    # instead of waking on every empty 1 ms slot: below 1,000
-                    # CPS that is several slots, above it a fraction of one.
-                    wait = (1.0 - credit) / cps
+                if credit < chunk:
+                    # Nothing is due yet. Wait for a whole batch instead of
+                    # waking for every single click: one call per millisecond
+                    # slot keeps SendInput's per-call overhead off the hot
+                    # path, and at low rates the wait is the next click.
+                    wait = (chunk - credit) / cps
                     resumed = 0.0
                     if wait > 0.0:
                         sleep_from = time.perf_counter()
@@ -607,21 +592,12 @@ class ClickEngine:
                                 "No clickable window was found under the cursor."
                             )
                         else:
-                            if delivery == "sync":
-                                accepted = winapi.sync_clicks(direct_target, due)
-                                if accepted < due:
-                                    detail = (
-                                        "The target window timed out or "
-                                        "rejected some synchronous clicks."
-                                    )
-                            else:
-                                accepted = winapi.post_clicks(direct_target, due)
-                                if accepted < due:
-                                    detail = (
-                                        "The target window rejected some "
-                                        "posted clicks. Try SendInput delivery "
-                                        "instead."
-                                    )
+                            accepted = winapi.post_clicks(direct_target, due)
+                            if accepted < due:
+                                detail = (
+                                    "The target window rejected some posted "
+                                    "clicks. Try SYNC delivery instead."
+                                )
 
                 call_seconds = time.perf_counter() - call_start
 

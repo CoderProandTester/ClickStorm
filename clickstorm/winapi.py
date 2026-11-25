@@ -66,14 +66,6 @@ CWP_SKIPDISABLED = 0x0002
 CWP_SKIPTRANSPARENT = 0x0004
 GA_ROOT = 2
 
-# SendMessageTimeout flags: block while waiting, with the timeout as the only
-# escape. ERROR_TIMEOUT is how a timed-out send is told apart from a window
-# procedure that simply returned zero. SMTO_ABORTIFHUNG is deliberately not
-# used: it can return zero without setting ERROR_TIMEOUT, which would make an
-# unprocessed click look successful.
-SMTO_BLOCK = 0x0001
-ERROR_TIMEOUT = 1460
-
 THREAD_PRIORITY_NORMAL = 0
 THREAD_PRIORITY_HIGHEST = 2
 THREAD_PRIORITY_TIME_CRITICAL = 15
@@ -190,17 +182,6 @@ user32.PostMessageW.argtypes = (
     wintypes.LPARAM,
 )
 user32.PostMessageW.restype = wintypes.BOOL
-
-user32.SendMessageTimeoutW.argtypes = (
-    wintypes.HWND,
-    wintypes.UINT,
-    wintypes.WPARAM,
-    wintypes.LPARAM,
-    wintypes.UINT,
-    wintypes.UINT,
-    ctypes.POINTER(ULONG_PTR),
-)
-user32.SendMessageTimeoutW.restype = LRESULT
 
 user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
 user32.GetAncestor.restype = wintypes.HWND
@@ -529,50 +510,6 @@ def post_click(target: DirectTarget) -> bool:
         user32.PostMessageW(target.hwnd, up_msg, up_wparam, lparam)
     )
     return down_ok and up_ok
-
-
-def sync_clicks(target: DirectTarget, count: int, timeout_ms: int = 20) -> int:
-    """Deliver clicks synchronously and return how many the window processed.
-
-    ``SendMessageTimeoutW`` calls the target's window procedure directly: the
-    click is already handled when the call returns, so it does not sit in the
-    posted-message queue (which Windows caps at 10,000 messages) and cannot be
-    dropped by queue pressure. The bounded timeout keeps a hung or busy window
-    from freezing the click thread.
-
-    A zero return is ambiguous - the window procedure may legitimately return
-    zero - so only ``ERROR_TIMEOUT`` after a zero return is treated as a
-    failure. That is why the last error is cleared before every call.
-    """
-    if count <= 0:
-        return 0
-    down_msg, up_msg, down_wparam, up_wparam = direct_messages(
-        target.button, target.x, target.y
-    )
-    lparam = _lparam(target.x, target.y)
-    hwnd = target.hwnd
-    send = user32.SendMessageTimeoutW
-    result = ULONG_PTR()
-    flags = SMTO_BLOCK
-    accepted = 0
-    for _ in range(count):
-        ctypes.set_last_error(0)
-        if not send(
-            hwnd, down_msg, down_wparam, lparam, flags, timeout_ms,
-            ctypes.byref(result),
-        ) and ctypes.get_last_error() == ERROR_TIMEOUT:
-            break
-        ctypes.set_last_error(0)
-        if not send(
-            hwnd, up_msg, up_wparam, lparam, flags, timeout_ms,
-            ctypes.byref(result),
-        ) and ctypes.get_last_error() == ERROR_TIMEOUT:
-            # Never leave the target with the button down: queue the release
-            # asynchronously so a timed-out up cannot latch it.
-            user32.PostMessageW(hwnd, up_msg, up_wparam, lparam)
-            break
-        accepted += 1
-    return accepted
 
 
 def post_clicks(target: DirectTarget, count: int) -> int:

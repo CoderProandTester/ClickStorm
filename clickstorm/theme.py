@@ -419,7 +419,7 @@ class LogSlider(tk.Canvas):
         self,
         parent,
         minimum=1.0,
-        maximum=100_000.0,
+        maximum=5_000.0,
         value=500.0,
         command=None,
         bg=None,
@@ -494,10 +494,6 @@ class LogSlider(tk.Canvas):
             return self.maximum
         if t <= 0.0005:
             return self.minimum
-        if raw >= 50_000:
-            return float(round(raw / 1000) * 1000)
-        if raw >= 10_000:
-            return float(round(raw / 500) * 500)
         if raw >= 1000:
             return float(round(raw / 100) * 100)
         if raw >= 100:
@@ -527,9 +523,8 @@ class LogSlider(tk.Canvas):
             (10, "10"),
             (100, "100"),
             (1000, "1K"),
-            (10_000, "10K"),
-            (50_000, "50K"),
-            (100_000, "MAX"),
+            (2500, "2.5K"),
+            (5000, "5K"),
         ):
             if value > self.maximum:
                 continue
