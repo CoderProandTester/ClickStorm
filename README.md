@@ -65,6 +65,8 @@ with Start-menu shortcuts and an entry in Settings → Apps.
   input events and failed events.
 - **UPDATES** button: checks the latest GitHub release, lists the installers it
   offers and installs the one you pick.
+- **Gauntlet**: a standalone console script (`gauntlet.py`, also attached to
+  every release) with the same 25,000 CPS batch engine and F6/ESC hotkeys.
 
 ## Run from source
 
@@ -76,6 +78,37 @@ python clickstorm.py
 
 Use `pythonw clickstorm.py` if you want to launch without a terminal. The
 source build has no dependencies.
+
+## Gauntlet: standalone 25,000 CPS script
+
+`gauntlet.py` is a self-contained console autoclicker with no imports from the
+`clickstorm` package, so it also runs as a single downloaded file. It is the
+smallest form of the same idea: one pre-allocated `SendInput` batch array, a
+dedicated daemon thread, and a watchdog on the main thread.
+
+```bat
+python gauntlet.py                 :: 25,000 CPS, left button, 25 clicks per call
+python gauntlet.py --cps 5000
+python gauntlet.py --cps 0         :: uncapped: send as fast as Windows accepts
+python gauntlet.py --batch 50 --button right
+```
+
+**F6** arms and disarms, **ESC** stops the worker and exits. The console prints
+achieved CPS, batch size, accepted clicks and dropped events once a second.
+Clicks go to whatever is under the cursor.
+
+The script requests 1 ms timer resolution (`timeBeginPeriod(1)`),
+`THREAD_PRIORITY_ABOVE_NORMAL` for the worker (never `REALTIME`, which can
+starve the HID input stack), and restores both on exit. Above 300 us of a
+deadline it yields the timeslice, then spins only the last 300 us, so the
+cadence is exact without pegging a core. Batches are sent through one
+`SendInput` call each; the 40-byte 64-bit `INPUT` layout is asserted at start
+to catch the classic 32-byte union mistake that makes `SendInput` return 0.
+
+Like every `SendInput` tool, what the target *receives* is capped by Windows
+(roughly 6,000-7,000 CPS into most apps), even though the sender can emit
+25,000. Run it from an Administrator terminal when the target window is
+elevated; Windows UIPI blocks injected input across integrity levels.
 
 ## Build the executable
 
@@ -109,30 +142,21 @@ the minimum OS to Windows 10 and restricts itself to the matching architecture.
 ## Releases (GitHub Actions)
 
 `.github/workflows/release.yml` builds all three installers and publishes them
-to a GitHub Release. Every push to `main` also builds the three installers as
-workflow artifacts (no release is created), which is the easiest way to confirm
-the action is working. The publish job runs **only** for a version tag, a
-`release/v<version>` branch, or a manual run with **publish** enabled, so a
-plain push to `main` never creates a release. Three ways to publish:
+to a GitHub Release **on every push to `main`**. That single branch is the
+whole release process - there are no release branches to create, push or clean
+up. The workflow reads the version, creates the `v<version>` tag itself,
+attaches the three installers and `Gauntlet-<version>.py`, and skips publishing
+when that version is already on the Releases page, so ordinary main pushes do
+not republish it.
 
 ```bat
-git tag v4.0.0
-git push origin v4.0.0
+git push origin main
 ```
 
-or push a branch named after the version, which is the branch-only route for
-someone who can push commits but not tags:
-
-```bat
-git push origin main:release/v4.0.0
-```
-
-or, with no local git credentials at all, open **Actions → Windows installers →
-Run workflow**, tick **publish** and run it. In every case the workflow creates
-the `v<version>` tag itself and attaches the installers.
-
-The workflow reads the version from `clickstorm/__init__.py`, so bump it before
-publishing. x64 and x86 build on `windows-latest` (x86 uses 32-bit Python);
+A `v*` tag push or a manual run with **publish** enabled still publishes, if
+you prefer one of those. The workflow reads the version from
+`clickstorm/__init__.py` (and `gauntlet.py` for the script asset), so bump both
+before pushing. x64 and x86 build on `windows-latest` (x86 uses 32-bit Python);
 ARM64 builds natively on the `windows-11-arm` runner and is allowed to fail
 without holding back the x64/x86 release. A manual run without **publish**
 produces the same installers as downloadable build artifacts only.
@@ -308,6 +332,7 @@ MIT. See [LICENSE](LICENSE).
 
 ```
 clickstorm.py            Entry point (used by AutoClicker.spec)
+gauntlet.py             Standalone console Gauntlet autoclicker (25,000+ CPS)
 clickstorm/app.py        Main window, hotkeys, session control
 clickstorm/engine.py     Click engine: pacing, batching, exact targets
 clickstorm/winapi.py     Dependency-free Win32 layer (SendInput, cursor, keys)

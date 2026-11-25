@@ -139,7 +139,7 @@ the spec is what keeps Windows from opening a console window.
 The Inno Setup script takes the app version and target architecture as defines:
 
 ```bat
-iscc /DMyAppArch=x64 /DMyAppVersion=4.2.0 installer\ClickStorm.iss
+iscc /DMyAppArch=x64 /DMyAppVersion=4.3.0 installer\ClickStorm.iss
 ```
 
 `MyAppArch` is `x64`, `x86` (32-bit) or `arm64`. Output:
@@ -163,35 +163,34 @@ restricts itself to Windows 10+ and the matching architecture.
 | arm64 | `windows-11-arm` | arm64 |
 
 Each job verifies the built exe is the requested architecture, compiles the
-matching installer, and uploads it as an artifact. Pushing a `v*` tag publishes
-the three installers to a GitHub Release, and so does a push to a
-`release/v<version>` branch or a manual run with **publish** enabled (those two
-create the tag). The workflow also fails if the tag or release branch does not
-match `clickstorm/__init__.py`. The ARM64 leg is allowed to fail so a runner
-outage cannot block the x64/x86 release.
+matching installer, and uploads it as an artifact. **A push to `main`
+publishes the release**: the workflow creates the `v<version>` tag itself,
+attaches the three installers plus `Gauntlet-<version>.py`, and leaves the
+version alone on later main pushes once it is already released. There are no
+release branches. A `v*` tag push and a manual run with **publish** enabled
+still work, and a tag that does not match `clickstorm/__init__.py` fails. The
+ARM64 leg is allowed to fail so a runner outage cannot block the x64/x86
+release.
 
 Release procedure:
 
-1. Bump `__version__` in `clickstorm/__init__.py`.
+1. Bump `__version__` in `clickstorm/__init__.py` **and** in `gauntlet.py`.
 2. Update `README.md` if behaviour changed.
-3. Commit and push `main`.
-4. Tag and push the tag:
+3. Commit and push `main`:
 
    ```bat
-   git tag v4.0.0
-   git push origin v4.0.0
+   git push origin main
    ```
 
-   Without local git credentials, push a release branch instead — it publishes
-   the same way and also creates the tag:
+   The push to `main` is what publishes the release. No tag push and no
+   release branch are needed.
 
-   ```bat
-   git push origin main:release/v4.0.0
-   ```
+   Alternatively tag it yourself (`git tag v4.0.0` then
+   `git push origin v4.0.0`) or run the workflow from the Actions UI with
+   **publish** enabled.
 
-   Or run the workflow from the Actions UI with **publish** enabled.
-
-5. Confirm all three installers are attached to the release.
+4. Confirm all three installers and `Gauntlet-<version>.py` are attached to
+   the release.
 
 Manual workflow runs produce the same installers as downloadable artifacts
 without creating a release.

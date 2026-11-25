@@ -1,15 +1,15 @@
 name: Windows installers
 
 # Builds one installer per Windows architecture and publishes them to a GitHub
-# Release for a version tag push, a push to a release/v<version> branch, or a
-# manual run with "publish" enabled. The last two paths need no local git
-# credentials: the workflow creates the v<version> tag itself from
-# clickstorm/__init__.py.
+# Release whenever main moves to a new version. main is the only branch that
+# publishes, so no release branches are created: bump clickstorm/__init__.py,
+# push main, and the workflow creates the v<version> tag and attaches the
+# installers plus the standalone gauntlet.py script. A version that is already
+# released is left untouched, so ordinary main pushes do not republish it.
 on:
   push:
     branches:
       - main
-      - "release/v*"
     tags:
       - "v*"
   workflow_dispatch:
@@ -24,9 +24,9 @@ permissions:
 
 concurrency:
   group: windows-installers-${{ github.ref }}
-  # A newer push to main may cancel an older build, but never a release run:
-  # cancelling one mid-publish leaves a half-populated release.
-  cancel-in-progress: ${{ github.event_name == 'push' && github.ref_type == 'branch' && !startsWith(github.ref, 'refs/heads/release/') }}
+  # Never cancel a run: a main push may be mid-publish and cancelling it would
+  # leave a half-populated release. Newer runs queue behind it instead.
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -83,11 +83,8 @@ jobs:
               throw "Tag '$subject' does not match the app version '$expected'. Bump clickstorm/__init__.py or retag."
             }
             Write-Host "Tag $subject matches the app version"
-          } elseif ("$subject".StartsWith("release/")) {
-            if ($subject -ne "release/$expected") {
-              throw "Branch '$subject' does not match the app version 'release/$expected'. Bump clickstorm/__init__.py or rename the branch."
-            }
-            Write-Host "Branch $subject matches the app version"
+          } else {
+            Write-Host "Branch $subject publishes v$($expected.TrimStart('v'))"
           }
 
       - name: Build the app
@@ -140,14 +137,13 @@ jobs:
   release:
     name: Publish release
     needs: build
-    # Publish for a v* tag push, a release/v* branch push, or when the workflow
-    # is started manually with "publish" enabled. Always runs even when one
-    # build leg failed (that is why the verify step below insists on at least
-    # one installer).
+    # Publish for a push to main, a v* tag push, or a manual run with
+    # "publish" enabled. Always runs even when one build leg failed (that is
+    # why the verify step below insists on at least one installer).
     if: |
       always() && !cancelled() &&
-      (startsWith(github.ref, 'refs/tags/') ||
-       startsWith(github.ref, 'refs/heads/release/') ||
+      (github.ref == 'refs/heads/main' ||
+       startsWith(github.ref, 'refs/tags/') ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -168,11 +164,29 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Publishing v$version"
 
+      - name: Check whether this version is already released
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.version.outputs.version }}" \
+               --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "v${{ steps.version.outputs.version }} is already published; "
+            echo "bump clickstorm/__init__.py and gauntlet.py to publish again."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download installers
         uses: actions/download-artifact@v4
         with:
           path: release
           merge-multiple: true
+
+      - name: Stage the standalone Gauntlet script
+        run: |
+          cp gauntlet.py "release/Gauntlet-${{ steps.version.outputs.version }}.py"
 
       - name: Verify installers
         run: |
@@ -183,8 +197,10 @@ jobs:
             echo "No installer was built, so there is nothing to publish." >&2
             exit 1
           fi
+          test -f "release/Gauntlet-${{ steps.version.outputs.version }}.py"
 
       - name: Create GitHub release
+        if: steps.existing.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
           # Creating the tag here is what lets a manual run publish without
@@ -192,6 +208,6 @@ jobs:
           tag_name: v${{ steps.version.outputs.version }}
           target_commitish: ${{ github.sha }}
           name: v${{ steps.version.outputs.version }}
-          files: release/*.exe
+          files: release/*
           generate_release_notes: true
           fail_on_unmatched_files: true
