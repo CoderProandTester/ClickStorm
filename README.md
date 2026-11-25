@@ -1,14 +1,17 @@
 # ClickStorm
 
-A fast, dependency-free Windows auto clicker. It drives the mouse through
-arrayed Win32 `SendInput` calls, so it delivers whole bursts of clicks per
-system call instead of paying per-click overhead. The UI is pure Tkinter, the
-engine is isolated in its own high-priority thread, and settings persist in
-`%APPDATA%\ClickStorm\settings.json`.
+A fast Windows auto clicker with a native Rust click core and a pure Tkinter
+interface. The engine keeps one pre-allocated `INPUT` batch, paces clicks
+against a monotonic clock and delivers them through Win32 `SendInput` or
+posted window messages. The Rust core (`native/clickstorm-engine`) runs that
+hot loop outside the Python interpreter; when its DLL is absent the app falls
+back to the identical pure Python engine, so a source run needs no toolchain.
+Settings persist in `%APPDATA%\ClickStorm\settings.json`.
 
-Supported on **Windows 10 and Windows 11** (x64, x86 and ARM64). The packaged
-app is a single windowed `ClickStorm.exe`; it does **not** open a console or
-PowerShell window.
+Supported on **Windows 10 and Windows 11** (x64, x86 and ARM64). The native
+Rust core is built for 64-bit x64 and ARM64; the 32-bit build uses the Python
+engine. The packaged app is a single windowed `ClickStorm.exe`; it does
+**not** open a console or PowerShell window.
 
 ## Install
 
@@ -36,6 +39,12 @@ with Start-menu shortcuts and an entry in Settings → Apps.
 
 - Click rates from 1 to **25,000 CPS**, with a logarithmic slider, presets and
   a numeric entry.
+- **Native Rust engine.** Pacing, adaptive batching, `SendInput` and direct
+  delivery all run in `clickstorm_engine.dll` (Rust, no external crates).
+  Python only configures a session and reads counters, so there is no
+  interpreter or garbage collector in the click path. The ENGINE strip says
+  which core is active; without the DLL (source run, 32-bit build) the same
+  engine runs in Python.
 - Per-run click target from 1 to **25,000 clicks**, a duration limit, or
   unlimited running.
 - All five mouse buttons: left, right, middle, X1 and X2.
@@ -65,8 +74,9 @@ with Start-menu shortcuts and an entry in Settings → Apps.
   input events and failed events.
 - **UPDATES** button: checks the latest GitHub release, lists the installers it
   offers and installs the one you pick.
-- **Gauntlet**: a standalone console script (`gauntlet.py`, also attached to
-  every release) with the same 25,000 CPS batch engine and F6/ESC hotkeys.
+- **Gauntlet**: a console script (`gauntlet.py`, also attached to every
+  release) that drives the same engine with F6/ESC hotkeys and live CPS. It
+  uses the native core whenever the ClickStorm package is present.
 
 ## Run from source
 
@@ -77,14 +87,24 @@ python clickstorm.py
 ```
 
 Use `pythonw clickstorm.py` if you want to launch without a terminal. The
-source build has no dependencies.
+source build has no Python dependencies. If `clickstorm_engine.dll` is not
+next to the package the app runs the Python engine and the ENGINE strip says
+`Python engine`; build the DLL with the command in the next section to get
+the native core.
 
 ## Gauntlet: standalone 25,000 CPS script
 
-`gauntlet.py` is a self-contained console autoclicker with no imports from the
-`clickstorm` package, so it also runs as a single downloaded file. It is the
-smallest form of the same idea: one pre-allocated `SendInput` batch array, a
-dedicated daemon thread, and a watchdog on the main thread.
+`gauntlet.py` is the console harness for the same click engine. Run it from
+the project (or beside an installed ClickStorm) and it drives
+`clickstorm.engine` - the native Rust core when `clickstorm_engine.dll` is
+present, otherwise the Python engine - so there is one engine rather than two
+separate implementations. The single-file release asset keeps a compact
+embedded fallback so it still starts on a machine without the package, but
+that fallback is never used when ClickStorm is available.
+
+`--batch` only applies to the embedded fallback; the shared engine chooses the
+batch size adaptively because wide `SendInput` calls are slower once a target
+throttles input.
 
 ```bat
 python gauntlet.py                 :: 25,000 CPS, left button, 25 clicks per call
@@ -112,13 +132,24 @@ elevated; Windows UIPI blocks injected input across integrity levels.
 
 ## Build the executable
 
+Build the native core first (64-bit builds only; requires Rust):
+
+```bat
+cargo build --release --manifest-path native\clickstorm-engine\Cargo.toml
+copy native\clickstorm-engine\target\release\clickstorm_engine.dll native\
+```
+
+Then package the app:
+
 ```bat
 pyinstaller --noconfirm AutoClicker.spec
 ```
 
 The result is `dist\ClickStorm.exe`. The spec builds `clickstorm.py` in
 windowed mode (`console=False`) with `autoclicker.ico` as the application icon,
-so launching it shows only the app window.
+so launching it shows only the app window. It bundles
+`native\clickstorm_engine.dll` when that file exists and silently packages the
+Python engine when it does not, so CI and source builds both work.
 
 ## Build the installer
 
@@ -269,6 +300,39 @@ per call, growing to 64) with small adaptive calls: on the same machine, a
 5,000 CPS target delivered about **166 CPS** before that change and about
 **4,980 CPS** after it.
 
+### What "25,000 CPS" can and cannot mean
+
+A clicker can *emit* 25,000 clicks a second; the numbers above are what the
+receiving window actually **received**. Only the second number matters.
+
+- **`SendInput` has a hard user-mode ceiling.** Microsoft documents that the
+events are inserted into the input stream *serially*, and Windows hands them
+to one system input thread before the target's message loop sees them. On the
+machine measured here that tops out around **6,000-7,000 delivered CPS** no
+matter how many events are batched into a call.
+- **Wider batches do not bypass it.** A GitHub autoclicker claiming 100,000
+CPS from arrayed `SendInput` is counting events handed to the OS queue, not
+clicks the target processed. Once that queue is saturated the receiving app
+consumes at its own rate and the rest is coalesced or dropped.
+- **Posted messages do skip the input queue**, which is why the Direct/AUTO
+path can make a normal Win32 window count about **25,000 CPS**. Games read
+raw input or DirectInput, ignore posted messages, and still act once per
+frame; posted clicks are not a way to make a game see 25,000 real mouse
+clicks.
+- **Kernel drivers are not a shortcut.** Interception or a virtual HID device
+needs an administrator-installed signed driver, and the target still has to
+process the input. A game at 240 fps cannot act on more than 240 clicks a
+second, and a physical 1 kHz mouse cannot report more than 1,000 clicks a
+second in the first place.
+- **Nothing here fabricates the number.** The gauge counts only events Windows
+accepted (`SendInput`'s return value) or messages successfully queued
+(`PostMessage`'s return value). A 25,000 target that reads 6,000 is Windows
+refusing the rest, not a rounding error.
+
+`tools/click_counter.py` is a separate window that counts the button messages
+it receives and shows live delivered CPS. Point ClickStorm at it to measure
+your own machine with either delivery mode.
+
 ### Why more threads do not help
 
 A single click thread is not a limitation that extra threads can lift.
@@ -333,8 +397,10 @@ MIT. See [LICENSE](LICENSE).
 ```
 clickstorm.py            Entry point (used by AutoClicker.spec)
 gauntlet.py             Standalone console Gauntlet autoclicker (25,000+ CPS)
+native/clickstorm-engine/ Rust click core: pacing, batching, SendInput, direct
+clickstorm/native_engine.py  ctypes binding and Python-fallback selection
 clickstorm/app.py        Main window, hotkeys, session control
-clickstorm/engine.py     Click engine: pacing, batching, exact targets
+clickstorm/engine.py     Python click engine: pacing, batching, exact targets
 clickstorm/winapi.py     Dependency-free Win32 layer (SendInput, cursor, keys)
 clickstorm/settings.py   Persistent settings + migration
 clickstorm/settings_dialog.py  Advanced settings window
@@ -357,13 +423,15 @@ installer/ClickStorm.iss Inno Setup installer recipe
   slot and every `SendInput` call, but a backed-up input queue can still take
   a moment to drain.
 - **25,000 CPS reads around 6,000 CPS actual.** That is the `SendInput`
-  ceiling: Windows delivers roughly 6,000-7,000 injected clicks per second
-  here no matter how high the target is, and no user-mode clicker can change
-  that. Set **Settings → Delivery** to **AUTO** (or **Direct window
-  messages**): direct posting measured ~25,000 CPS, and AUTO picks it
-  automatically above 6,000 CPS while staying on SendInput for slower rates.
-  If the window under the cursor does not accept posted clicks, AUTO falls
-  back to SendInput rather than clicking into nothing.
+  ceiling: Windows serialises injected input through one system input thread,
+  so it delivers roughly 6,000-7,000 clicks per second here no matter how high
+  the target is. No user-mode clicker can change that, and wider batches only
+  fill the queue. Set **Settings → Delivery** to **AUTO** (or **Direct
+  window messages**): posted messages skip the input queue and measured
+  ~25,000 CPS into a Win32 window, while games and raw-input apps ignore
+  them. If the window under the cursor does not accept posted clicks, AUTO
+  falls back to SendInput rather than clicking into nothing. Use
+  `tools/click_counter.py` to see what a target really receives.
 - **The update reported a missing module.** 4.0.1 starts the downloaded
   installer without inheriting the windowed app's absent std handles (that
   call was the failure), and every update failure is now written to

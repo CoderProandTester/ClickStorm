@@ -8,7 +8,7 @@ from tkinter import messagebox, ttk
 
 from . import APP_NAME, APP_VERSION
 from . import theme, winapi
-from .settings import Settings, settings_path
+from .settings import Settings, last_save_error, settings_path
 from .theme import COLORS
 
 
@@ -519,6 +519,30 @@ class SettingsDialog(tk.Toplevel):
             minimize_on_start=bool(self.minimize_var.get()),
             total_clicks=self._total_clicks,
         )
+        # Write the file before the window closes. The old flow destroyed the
+        # dialog first and left persistence to the app callback, so a callback
+        # exception closed the window and silently discarded the changes.
+        if not updated.save():
+            messagebox.showerror(
+                "Could not save settings",
+                "ClickStorm could not write its settings file:\n\n"
+                f"{settings_path()}\n\n"
+                f"{last_save_error() or 'Unknown error.'}",
+                parent=self,
+            )
+            return
+
+        try:
+            self._on_save(updated)
+        except Exception as exc:
+            messagebox.showerror(
+                "Settings saved, but not applied",
+                "The settings were written to disk, but this window could "
+                "not apply them:\n\n"
+                f"{type(exc).__name__}: {exc}",
+                parent=self,
+            )
+
         self._cancel_capture()
         try:
             self.grab_release()
@@ -526,7 +550,6 @@ class SettingsDialog(tk.Toplevel):
             pass
         self._closed = True
         self.destroy()
-        self._on_save(updated)
 
     def cancel(self):
         self._cancel_capture()

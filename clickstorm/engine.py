@@ -196,6 +196,8 @@ class ClickEngine:
     touched from the worker thread.
     """
 
+    backend_name = "Python"
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._wake = threading.Event()
@@ -734,3 +736,22 @@ class ClickEngine:
         if config.position_mode == "fixed":
             return fixed_x, fixed_y
         return winapi.get_cursor_pos()
+
+
+def make_engine():
+    """Return the best available engine behind the one ClickEngine API.
+
+    The native Rust core is used when its DLL is present and speaks this
+    app's ABI; otherwise the pure Python engine runs unchanged. Both expose
+    start/stop/close/poll_events/is_running/get_stats, so the UI never needs
+    to know which one it got.
+    """
+    try:
+        from .native_engine import create_native_engine
+
+        engine = create_native_engine()
+        if engine is not None:
+            return engine
+    except Exception:
+        pass
+    return ClickEngine()

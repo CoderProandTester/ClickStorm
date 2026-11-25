@@ -152,7 +152,7 @@ THREAD_PRIORITY_ABOVE_NORMAL = 1
 VK_F6 = 0x75
 VK_ESCAPE = 0x1B
 
-__version__ = "4.3.0"  # keep in sync with clickstorm/__init__.py
+__version__ = "4.4.0"  # keep in sync with clickstorm/__init__.py
 
 DEFAULT_CPS = 25_000.0
 DEFAULT_BATCH = 25
@@ -396,6 +396,116 @@ class Gauntlet:
                     deadline = now
 
 
+# ---------------------------------------------------------------------------
+# Shared engine adapter
+# ---------------------------------------------------------------------------
+
+def _shared_engine_factory():
+    """Return ClickStorm's engine factory when the package is importable."""
+    try:
+        from clickstorm.engine import make_engine
+    except Exception:
+        return None
+    return make_engine
+
+
+class SharedGauntlet:
+    """The same hotkey harness, driving ClickStorm's real click engine.
+
+    Run from the project (or beside an installed ClickStorm) and this is what
+    clicks: the native Rust core when its DLL is present, otherwise the
+    Python engine. The embedded :class:`Gauntlet` loop is only used by the
+    single-file download, so wherever the package is available there is
+    exactly one engine rather than two separate implementations.
+    """
+
+    def __init__(self, engine, cps: float, button: str) -> None:
+        from clickstorm.engine import EngineConfig
+
+        self._engine = engine
+        self.cps = float(cps)
+        self.batch = 0
+        self._config = EngineConfig(
+            cps=self.cps,
+            button=button,
+            limit_mode="unlimited",
+            delivery="sendinput",
+        )
+        self._armed_flag = False
+        self._error = ""
+
+    @classmethod
+    def create(cls, cps: float, button: str):
+        factory = _shared_engine_factory()
+        if factory is None:
+            return None
+        try:
+            engine = factory()
+        except Exception:
+            return None
+        return cls(engine, cps, button)
+
+    # -- compatibility surface used by main() ---------------------------
+
+    @property
+    def clicks(self) -> int:
+        return int(self._engine.get_stats().clicks_sent)
+
+    @property
+    def failed(self) -> int:
+        return int(self._engine.get_stats().failed_events)
+
+    @property
+    def send_calls(self) -> int:
+        return int(self._engine.get_stats().send_calls)
+
+    @property
+    def armed(self) -> bool:
+        return self._armed_flag and self._engine.is_running()
+
+    @property
+    def error(self) -> str:
+        if self._error:
+            return self._error
+        if self._armed_flag:
+            return ""
+        stats = self._engine.get_stats()
+        if stats.state == "error" and stats.last_error:
+            return stats.last_error
+        return ""
+
+    def start(self) -> None:
+        # The engine owns its own thread from construction.
+        pass
+
+    def arm(self) -> None:
+        if self.armed:
+            return
+        self._error = ""
+        if not self._engine.start(self._config):
+            self._error = "the click engine is still shutting down"
+            return
+        self._armed_flag = True
+
+    def disarm(self) -> None:
+        self._armed_flag = False
+        self._engine.stop()
+
+    def toggle(self) -> bool:
+        if self.armed:
+            self.disarm()
+        else:
+            self.arm()
+        return self.armed
+
+    def stop(self) -> None:
+        self._armed_flag = False
+        self._engine.stop()
+
+    def join(self, timeout: float = 2.0) -> None:
+        self._engine.close(timeout)
+
+
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
         prog="gauntlet.py",
@@ -436,14 +546,37 @@ def _parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = _parse_args(argv)
-    gauntlet = Gauntlet(cps=args.cps, batch=args.batch, button=args.button)
+    target = args.cps if args.cps > 0.0 else DEFAULT_CPS
+    button = args.button.capitalize()
+    shared = SharedGauntlet.create(cps=target, button=button)
+    if shared is not None:
+        gauntlet = shared
+        backend = "shared ClickStorm engine (native core when present)"
+    else:
+        gauntlet = Gauntlet(cps=args.cps, batch=args.batch, button=args.button)
+        backend = "embedded fallback (ClickStorm package not found)"
 
-    print(f"ClickStorm Gauntlet {__version__} - SendInput batch engine")
-    print(
-        f"  batch       {gauntlet.batch} clicks "
-        f"({gauntlet._event_count} input events) per SendInput call"
-    )
-    if gauntlet.cps > 0.0:
+    print(f"ClickStorm Gauntlet {__version__} - one click engine")
+    print(f"  engine      {backend}")
+    if shared is not None:
+        print(
+            "  batch      adaptive - the shared engine narrows or widens "
+            "its SendInput call to what the target accepts"
+        )
+        if args.batch != DEFAULT_BATCH:
+            print(
+                "             --batch is only used by the embedded fallback; "
+                "ignored here"
+            )
+    else:
+        print(
+            f"  batch      {gauntlet.batch} clicks "
+            f"({gauntlet._event_count} input events) per SendInput call"
+        )
+    if shared is not None:
+        note = "" if args.cps > 0.0 else "  (uncapped maps to the 25,000 ceiling)"
+        print(f"  target      {_format_rate(target)} CPS, paced by the engine{note}")
+    elif target > 0.0:
         per_second = gauntlet.cps / gauntlet.batch
         print(
             f"  target      {_format_rate(gauntlet.cps)} CPS  "
@@ -489,9 +622,13 @@ def main(argv=None) -> int:
                 clicks = gauntlet.clicks
                 achieved = (clicks - prev_clicks) / elapsed
                 state = "ARMED" if gauntlet.armed else "IDLE"
+                batch_text = (
+                    "auto" if getattr(gauntlet, "batch", 1) == 0
+                    else f"{gauntlet.batch:>3}"
+                )
                 print(
                     f"[{now - started:7.1f}s] {state:<5} "
-                    f"{achieved:9,.0f} CPS  batch {gauntlet.batch:>3}  "
+                    f"{achieved:9,.0f} CPS  batch {batch_text}  "
                     f"clicks {clicks:>12,}  dropped {gauntlet.failed:,}",
                     flush=True,
                 )

@@ -20,6 +20,14 @@ from .winapi import BUTTONS, HOTKEY_KEYS
 SETTINGS_VERSION = 2
 _GEOMETRY_RE = re.compile(r"^\d+x\d+([+-]\d+[+-]\d+)?$")
 
+#: Why the last :meth:`Settings.save` call failed, for the UI to show. Empty
+#: after a successful write.
+_LAST_SAVE_ERROR = ""
+
+
+def last_save_error() -> str:
+    return _LAST_SAVE_ERROR
+
 
 def settings_path() -> Path:
     base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
@@ -162,7 +170,17 @@ class Settings:
         return out
 
     def save(self) -> bool:
+        """Write the settings atomically. Returns False and records why.
+
+        The write goes to a temporary file in the same directory, is flushed
+        to disk and then renamed over the real file, so a crash mid-write can
+        never leave a truncated settings.json behind. Callers that care about
+        failures (the settings dialog) use :func:`last_save_error`.
+        """
+        global _LAST_SAVE_ERROR
+        _LAST_SAVE_ERROR = ""
         path = settings_path()
+        temp_name = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             payload = json.dumps(
@@ -174,12 +192,17 @@ class Settings:
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as handle:
                     handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
                 os.replace(temp_name, path)
+                temp_name = None
             finally:
-                try:
-                    os.unlink(temp_name)
-                except OSError:
-                    pass
+                if temp_name is not None:
+                    try:
+                        os.unlink(temp_name)
+                    except OSError:
+                        pass
             return True
-        except Exception:
+        except Exception as exc:
+            _LAST_SAVE_ERROR = f"{type(exc).__name__}: {exc}"
             return False

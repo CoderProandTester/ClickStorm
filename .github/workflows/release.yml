@@ -44,15 +44,20 @@ jobs:
           - arch: x64
             os: windows-latest
             python-arch: x64
+            rust-target: x86_64-pc-windows-msvc
             experimental: false
           - arch: x86
             os: windows-latest
             python-arch: x86
+            # The Rust ABI structs are only guaranteed on 64-bit Windows, so
+            # the 32-bit build packages the Python engine instead.
+            rust-target: ""
             experimental: false
           # Native ARM64 build on GitHub's Windows 11 ARM runner.
           - arch: arm64
             os: windows-11-arm
             python-arch: arm64
+            rust-target: aarch64-pc-windows-msvc
             experimental: true
     steps:
       - name: Check out
@@ -86,6 +91,24 @@ jobs:
           } else {
             Write-Host "Branch $subject publishes v$($expected.TrimStart('v'))"
           }
+
+      - name: Build the native engine
+        if: matrix.rust-target != ''
+        shell: pwsh
+        run: |
+          # windows-latest ships Rust; fall back to the user-level path when
+          # cargo is present but not on PATH (the ARM64 runner does this).
+          if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+          }
+          if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            throw "cargo is not available on this runner"
+          }
+          rustup target add ${{ matrix.rust-target }}
+          cargo build --release --manifest-path native/clickstorm-engine/Cargo.toml --target ${{ matrix.rust-target }}
+          New-Item -ItemType Directory -Force -Path native | Out-Null
+          Copy-Item "native/clickstorm-engine/target/${{ matrix.rust-target }}/release/clickstorm_engine.dll" "native/clickstorm_engine.dll"
+          Get-Item native/clickstorm_engine.dll | Format-List Name,Length
 
       - name: Build the app
         shell: pwsh

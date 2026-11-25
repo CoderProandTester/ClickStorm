@@ -1,8 +1,9 @@
 # Contributing to ClickStorm
 
-Thanks for helping improve ClickStorm. It is a small, dependency-free Windows
-auto clicker, so contributions are easiest to review when they stay focused and
-keep the standard-library-only design.
+Thanks for helping improve ClickStorm. It is a small Windows auto clicker, so
+contributions are easiest to review when they stay focused. Python code is
+standard-library only; the optional acceleration core is dependency-free Rust
+(no crates) in `native/clickstorm-engine`.
 
 By contributing you agree that your work is licensed under the project's
 [MIT License](LICENSE).
@@ -45,7 +46,10 @@ python -m pip install "pyinstaller>=6.10,<7"
 | --- | --- |
 | `clickstorm.py` | Entry point (also used by the PyInstaller spec) |
 | `clickstorm/app.py` | Main window, session control, global hotkeys |
-| `clickstorm/engine.py` | Click engine: pacing, batching, exact targets |
+| `clickstorm/engine.py` | Python click engine: pacing, batching, exact targets |
+| `clickstorm/native_engine.py` | ctypes binding to the Rust core + fallback selection |
+| `native/clickstorm-engine/` | Rust click core (cdylib, no crates) |
+| `tools/click_counter.py` | Delivered-CPS verification harness (separate process) |
 | `clickstorm/winapi.py` | Win32 declarations and helpers (SendInput, cursor, keys) |
 | `clickstorm/settings.py` | Settings persistence and migrations |
 | `clickstorm/settings_dialog.py` | Advanced settings window |
@@ -80,8 +84,11 @@ properties when changing it:
 - **No giant catch-up bursts.** If the target is slow, the run should slow
   down; do not fire a backlog at it.
 
-`clickstorm` must remain standard-library only. If a feature needs a dependency,
-discuss it in an issue first.
+`clickstorm` Python code must remain standard-library only. The native core is
+Rust with no crates: keep it that way so CI needs no package download and the
+build stays reproducible. The native core is optional at runtime by design -
+the Python engine must stay functional, and `make_engine()` must keep falling
+back when the DLL is missing, 32-bit or ABI-mismatched.
 
 ## UI guidelines
 
@@ -96,8 +103,16 @@ discuss it in an issue first.
 Run before opening a pull request:
 
 ```bat
-python -m compileall -q clickstorm clickstorm.py
+python -m compileall -q clickstorm clickstorm.py gauntlet.py tools\click_counter.py
+cargo test --manifest-path native\clickstorm-engine\Cargo.toml
+cargo check --manifest-path native\clickstorm-engine\Cargo.toml --target x86_64-pc-windows-msvc
 ```
+
+The second cargo command type-checks the real Windows implementation (the host
+build only compiles the non-Windows stub). CI builds
+`native\clickstorm_engine.dll` for x64 and ARM64; the x86 build intentionally
+packages the Python engine because the ABI structs are only guaranteed on
+64-bit Windows.
 
 Then check the behaviour you touched manually:
 
@@ -127,12 +142,16 @@ Clicks are real input: point the cursor somewhere harmless before running it.
 ## Building the executable
 
 ```bat
+cargo build --release --manifest-path native\clickstorm-engine\Cargo.toml
+copy native\clickstorm-engine\target\release\clickstorm_engine.dll native\
 python -m PyInstaller --noconfirm --clean AutoClicker.spec
 ```
 
 Output: `dist\ClickStorm.exe`. PyInstaller is not a cross-compiler: the exe
 architecture matches the Python interpreter that built it. `console=False` in
-the spec is what keeps Windows from opening a console window.
+the spec is what keeps Windows from opening a console window. Delete
+`native\clickstorm_engine.dll` before packaging to verify the Python fallback
+build still works.
 
 ## Building the installer
 

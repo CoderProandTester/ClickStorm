@@ -6,3 +6,5 @@ dist/
 release/
 installer/.tools/
 *.log
+native/clickstorm-engine/target/
+native/clickstorm_engine.dll

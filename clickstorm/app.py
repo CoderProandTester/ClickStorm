@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import gc
 import os
 import queue
 import re
@@ -17,8 +18,8 @@ from tkinter import messagebox
 from . import APP_NAME, APP_TAGLINE
 from . import theme, winapi
 from .engine import (
-    ClickEngine,
     EngineConfig,
+    make_engine,
     MAX_CLICKS,
     MAX_CPS,
     MIN_CPS,
@@ -121,9 +122,12 @@ class ClickStormApp:
     def __init__(self, root: tk.Tk, settings: Settings):
         self.root = root
         self.settings = settings
-        self.engine = ClickEngine()
+        self.engine = make_engine()
 
         self.shutdown = False
+        self._gc_suspended = False
+        self._gc_was_enabled = True
+        self._save_job = None
         self._settings_open = False
         self._settings_dialog = None
         self._update_open = False
@@ -1069,8 +1073,9 @@ class ClickStormApp:
             if self.settings.pin_window and self.settings.delivery != "sendinput"
             else ""
         )
+        backend = getattr(self.engine, "backend_name", "Python")
         self.engine_info_var.set(
-            f"{delivery}  \u00b7  {position}{pinned}{jitter}\n"
+            f"{backend} engine  \u00b7  {delivery}  \u00b7  {position}{pinned}{jitter}\n"
             f"Three-tier wait  \u00b7  high-priority click thread"
         )
 
@@ -1111,6 +1116,7 @@ class ClickStormApp:
         self.interval_var.set(interval_text)
         self._update_rate_hint()
         self._update_limit_summary()
+        self._schedule_settings_save()
         if not self._run_active:
             self._gauge_target = self._rate
             self.gauge.set(
@@ -1177,6 +1183,7 @@ class ClickStormApp:
         if self._countdown_active or self._run_active:
             return
         self.settings.mouse_button = self.mouse_button_var.get()
+        self._schedule_settings_save()
 
     def _on_delay(self, value: str) -> None:
         if self._countdown_active or self._run_active:
@@ -1187,6 +1194,7 @@ class ClickStormApp:
             self._start_delay = 2.0
         self.settings.start_delay = self._start_delay
         self._update_footer_idle()
+        self._schedule_settings_save()
 
     # ------------------------------------------------------------------
     # Session limit UI
@@ -1198,6 +1206,7 @@ class ClickStormApp:
         self._limit_mode = value
         self.settings.limit_mode = value
         self._update_limit_ui()
+        self._schedule_settings_save()
 
     def _on_limit_entry(self, _event=None) -> None:
         if self._countdown_active or self._run_active:
@@ -1243,6 +1252,7 @@ class ClickStormApp:
                 self.limit_entry, _format_rate_input(self._duration)
             )
         self._update_limit_summary()
+        self._schedule_settings_save()
         return True
 
     @staticmethod
@@ -1519,6 +1529,7 @@ class ClickStormApp:
             return
 
         stats = self.engine.get_stats()
+        self._suspend_gc()
         self._active_session_id = stats.session_id
         self._run_active = True
         self._session_committed = False
@@ -1591,6 +1602,7 @@ class ClickStormApp:
                 )
 
     def _finish_session(self, reason: str, error_message: str, clicks: int) -> None:
+        self._resume_gc()
         if not self._run_active and self._session_committed:
             return
 
@@ -2000,9 +2012,70 @@ class ClickStormApp:
         self._update_rate_hint()
         self._update_limit_summary()
         self._update_footer_idle()
+        # The dialog writes the file itself before it closes, so a failure is
+        # reported there instead of being swallowed here. This second write
+        # only covers callers that build a Settings object directly.
         self.settings.save()
         if not self._run_active and not self._countdown_active:
             self._update_stats_display(self.engine.get_stats(), final=True)
+
+    def _schedule_settings_save(self) -> None:
+        """Persist main-window changes shortly after they are made.
+
+        Slider drags emit dozens of callbacks a second; coalescing them keeps
+        the settings file from being rewritten on every pixel while still
+        making a change survive an unexpected close. The settings dialog does
+        not use this path: it writes synchronously and reports failures.
+        """
+        if self.shutdown:
+            return
+        try:
+            if self._save_job is not None:
+                self.root.after_cancel(self._save_job)
+            self._save_job = self.root.after(500, self._save_settings_now)
+        except Exception:
+            self._save_job = None
+
+    def _save_settings_now(self) -> None:
+        self._save_job = None
+        if self.shutdown:
+            return
+        try:
+            self.settings.cps = self._rate
+            self.settings.mouse_button = self.mouse_button_var.get()
+            self.settings.limit_mode = self._limit_mode
+            self.settings.click_limit = self._click_limit
+            self.settings.duration = self._duration
+            self.settings.start_delay = self._start_delay
+            self.settings.save()
+        except Exception:
+            _log_exception("Saving settings")
+
+    # ------------------------------------------------------------------
+    # Garbage collection during a run
+    # ------------------------------------------------------------------
+
+    def _suspend_gc(self) -> None:
+        """Turn Python's cyclic GC off while the click engine is running.
+
+        The native engine clicks on its own Rust thread, so no Python object
+        is allocated per click. Suspending the collector removes the last way
+        a Python-side pause could touch a session; reference counting still
+        frees ordinary objects, and collection resumes when the run ends.
+        """
+        if self._gc_suspended:
+            return
+        self._gc_was_enabled = gc.isenabled()
+        if self._gc_was_enabled:
+            gc.disable()
+        self._gc_suspended = True
+
+    def _resume_gc(self) -> None:
+        if not self._gc_suspended:
+            return
+        self._gc_suspended = False
+        if self._gc_was_enabled:
+            gc.enable()
 
     # ------------------------------------------------------------------
     # Updates
@@ -2065,6 +2138,13 @@ class ClickStormApp:
             except Exception:
                 pass
             self._hotkey_job = None
+        if self._save_job is not None:
+            try:
+                self.root.after_cancel(self._save_job)
+            except Exception:
+                pass
+            self._save_job = None
+        self._resume_gc()
 
         if self._run_active and not self._session_committed:
             try:
@@ -2165,6 +2245,12 @@ def main() -> None:
         root.focus_force()
     except Exception:
         pass
+
+    # Everything allocated during startup is long-lived (the window, its
+    # widgets, fonts and cached objects). Freezing it moves it out of the
+    # collector's generations, so later collections never rescan it.
+    gc.freeze()
+
     root.mainloop()
 
     # If the user closed the window through some other path, make sure the
