@@ -425,7 +425,7 @@ class ClickStormApp:
         ).pack(anchor="e")
         tk.Label(
             interval_block,
-            text="BATCH INTERVAL",
+            text="CLICK INTERVAL",
             bg=COLORS["card"],
             fg=COLORS["faint"],
             font=theme.font(7, "bold"),
@@ -697,8 +697,8 @@ class ClickStormApp:
         badge_row = tk.Frame(inner, bg=COLORS["card"])
         badge_row.pack(fill="x")
         for text, color in (
-            ("BATCHED INPUT", COLORS["accent"]),
-            ("1 MS TIMER", COLORS["green"]),
+            ("ONE CLICK PER CALL", COLORS["accent"]),
+            ("HIGH-RES TIMER", COLORS["green"]),
             ("EXACT TARGET", COLORS["purple"]),
         ):
             badge = tk.Frame(
@@ -847,7 +847,7 @@ class ClickStormApp:
             ("remaining", "REMAINING", COLORS["amber"]),
             ("average", "AVERAGE", COLORS["text"]),
             ("peak", "PEAK", COLORS["purple"]),
-            ("calls", "BATCHES", COLORS["text_dim"]),
+            ("calls", "SEND CALLS", COLORS["text_dim"]),
             ("inputs", "INPUT EVENTS", COLORS["text_dim"]),
             ("dropped", "FAILED EVENTS", COLORS["red"]),
         )
@@ -1034,7 +1034,7 @@ class ClickStormApp:
 
     def _refresh_engine_strip(self) -> None:
         delivery = (
-            "SendInput batching"
+            "SendInput, one click per call"
             if self.settings.delivery == "sendinput"
             else "Direct window messages (experimental)"
         )
@@ -1050,7 +1050,7 @@ class ClickStormApp:
         )
         self.engine_info_var.set(
             f"{delivery}  \u00b7  {position}{jitter}\n"
-            f"1 ms timer resolution  \u00b7  high-priority click thread"
+            f"Three-tier wait  \u00b7  high-priority click thread"
         )
 
     def _update_footer_idle(self) -> None:
@@ -1105,13 +1105,19 @@ class ClickStormApp:
     def _update_rate_hint(self) -> None:
         rate = self._rate
         if rate > 4_000:
-            text = "Above the ~4,000 CPS Windows input ceiling - it runs flat out."
+            text = (
+                "Past the ~4,000 CPS Windows ceiling - it runs flat out and "
+                "the target decides how many land."
+            )
             color = COLORS["red"]
         elif rate > 2_000:
-            text = "Very fast. Apps that throttle input will register fewer clicks."
+            text = (
+                "Near the Windows ceiling. Slow targets deliver fewer than "
+                "this, so watch the live CPS reading."
+            )
             color = COLORS["amber"]
         elif rate >= 1000:
-            text = "High speed, high precision. Batched into one input call."
+            text = "Full-fidelity range: Windows delivers practically every click."
             color = COLORS["text_dim"]
         elif rate >= 100:
             text = "Fast and app-friendly. Good for most games and tools."
@@ -1529,7 +1535,7 @@ class ClickStormApp:
             self.engine.stop()
             self._set_status("STOPPING", "stopping")
             self.footer_title_var.set("Stopping...")
-            self.footer_sub_var.set("Finishing the current batch.")
+            self.footer_sub_var.set("Finishing the current click.")
             self.stop_button.set_enabled(False)
 
     # ------------------------------------------------------------------

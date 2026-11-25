@@ -1,9 +1,10 @@
 # ClickStorm
 
 A fast, dependency-free Windows auto clicker. It drives the mouse through
-arrayed Win32 `SendInput` calls, so it delivers whole bursts of clicks per
-system call instead of paying per-click overhead. The UI is pure Tkinter, the
-engine is isolated in its own high-priority thread, and settings persist in
+Win32 `SendInput`, one click per call on an absolute timeline, because
+benchmarks show that is what the target actually receives — packed batches
+look faster but arrive coalesced. The UI is pure Tkinter, the engine is
+isolated in its own high-priority thread, and settings persist in
 `%APPDATA%\ClickStorm\settings.json`.
 
 Supported on **Windows 10 and Windows 11** (x64, x86 and ARM64). The packaged
@@ -40,13 +41,14 @@ with Start-menu shortcuts and an entry in Settings → Apps.
   unlimited running.
 - All five mouse buttons: left, right, middle, X1 and X2.
 - Global hotkeys: **F5 starts**, **F9 stops** (remappable in Settings).
-- Follow-cursor clicking or a fixed coordinate returned to on every burst.
+- Follow-cursor clicking or a fixed coordinate the cursor is returned to
+  while clicking.
 - Optional timing jitter, 0-5 s start delay, always-on-top and
   minimize-on-start.
-- Per-millisecond batching: at 25,000 CPS the engine sends 25 clicks in a
-  single `SendInput` call every 1 ms slot, and any missed slot is paid back as
-  catch-up clicks instead of being lost.
-- Live stats: actual CPS, peak CPS, rate history, progress, ETA, batches,
+- One click per `SendInput` call on an absolute timeline, with catch-up for
+  clicks a late turn missed; see [How the speed works](#how-the-speed-works)
+  for the measurements behind that choice.
+- Live stats: actual CPS, peak CPS, rate history, progress, ETA, send calls,
   input events and failed events.
 - **UPDATES** button: checks the latest GitHub release, lists the installers it
   offers and installs the one you pick.
@@ -101,15 +103,15 @@ the action is working. The publish job runs **only** for a version tag, a
 plain push to `main` never creates a release. Three ways to publish:
 
 ```bat
-git tag v3.0.0
-git push origin v3.0.0
+git tag v3.1.0
+git push origin v3.1.0
 ```
 
 or push a branch named after the version, which is the branch-only route for
 someone who can push commits but not tags:
 
 ```bat
-git push origin main:release/v3.0.0
+git push origin main:release/v3.1.0
 ```
 
 or, with no local git credentials at all, open **Actions → Windows installers →
@@ -152,44 +154,77 @@ limit expires, or when you press stop. In unlimited mode only stop ends a run.
 
 ## How the speed works
 
-- **Arrayed `SendInput`.** One call carries a whole megabyte-free array of
-  DOWN/UP `INPUT` structures, which removes the per-call cost that limits
-  naive one-click-per-call loops. The array is built once per session and
-  reused, so the hot loop never allocates. It starts at 16 clicks per call,
-  grows to 64 while everything lands and shrinks to 2 when Windows starts
-  rejecting events, which keeps a slow target from blocking `SendInput`.
-- **Millisecond batching math.** The target is converted to clicks per
-  millisecond (`cps / 1000`, so 25,000 CPS is 25 clicks/ms). The fractional
-  part is carried in a float bank, so a rate like 1,234 CPS (1.234 clicks/ms)
-  averages exactly 1,234 CPS instead of drifting.
-- **Catch-up for missed slots.** Every slot has an absolute deadline on
-  `perf_counter()`. If a turn wakes late, the engine counts the slots it
-  missed and adds their clicks to the same bank: two missed milliseconds at
-  25,000 CPS are paid out as 50 clicks on the next batch. More than 50 ms of
-  backlog is discarded so a system freeze cannot fire an unbounded burst; the
-  live footer shows how many clicks were recovered.
+- **One click per `SendInput` call.** Each click is a single DOWN/UP pair in
+  its own call, and the `INPUT` array is built once per session and reused,
+  so the hot loop never allocates. This is the change that decides how many
+  clicks the *target* receives: packing many clicks into one array raises the
+  emitted rate but lowers the delivered rate, because batched clicks carry no
+  spacing and the input stack coalesces them. An independent Windows
+  benchmark measured emitted +36% against delivered -22% (fidelity 99% to
+  57%), so ClickStorm sends one click at a time.
+- **Absolute click timeline.** Click *n* is due at `start + n / cps` on
+  `perf_counter()`, as a float, so a rate like 1,234 CPS averages exactly
+  1,234 CPS instead of drifting and the first click fires immediately.
+- **Catch-up without coalescing.** Every click whose deadline has passed is
+  due on the next turn, and those clicks are sent as separate calls so they
+  keep their own DOWN/UP pairs instead of collapsing into one. More than 50 ms
+  of backlog is counted and discarded so a system freeze cannot fire an
+  unbounded burst; the live footer shows how many clicks were recovered.
 - **Paced credit, not dropped work.** Click credit is only spent on clicks
   Windows confirmed. A rejected shortfall goes back into the bank and is
   retried on the next slot, so a run ends on the exact target.
-- **Precision timing.** A high-resolution waitable timer
-  (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`) covers most of each 1 ms slot and
-  the loop spins only the last few hundred microseconds, with
-  `timeBeginPeriod(1)` and time-critical thread priority while a session is
-  active. This holds the 1 ms grid without pinning an entire core.
+- **Three-tier wait.** Above 2 ms the thread sleeps on a high-resolution
+  waitable timer (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`), between 2 ms and
+  50 us it yields with `SwitchToThread`, and it only spins the last 50 us — so
+  the timeline holds without pinning a whole core. `timeBeginPeriod(1)` is
+  active for the session, because the default 15.6 ms Windows tick would cap
+  throughput near 64 CPS.
+- **Full-speed scheduling.** While a session runs the click thread asks for
+  time-critical priority and opts out of Windows 11 ecoQoS power throttling
+  (`SetThreadInformation`), so it is not parked on a low-power core mid-run.
 - **No cursor movement per click.** The mouse is not re-positioned for every
   click; SendInput clicks at the current position (fixed mode returns the
-  cursor to its point once per slot).
+  cursor to its point every couple of milliseconds).
 
 ### Why high targets run flat out
 
 Windows serialises injected input through a single system input thread, and the
-receiving application consumes it on its own message loop. Independent
-benchmarks of native clickers put the delivered ceiling at roughly
-**2,000-4,000 CPS**; above that, extra requested clicks are not delivered by
-Windows itself. `25,000` is therefore offered as a "run as fast as the machine
-allows" setting: the live CPS readout shows what actually reached Windows.
+receiving application consumes it on its own message loop, so the receiver —
+not ClickStorm — is the bottleneck above roughly **2,000 CPS**. A benchmarked
+native clicker measures **~4,000 delivered CPS** as the user-mode ceiling on a
+fast desktop, with 100% fidelity up to 2,000 CPS and ~99% when unthrottled.
+`25,000` is therefore offered as a "run as fast as the machine allows"
+setting: the live CPS readout shows what actually reached Windows, and the
+**TARGET**/**REMAINING** tiles still end the run on your exact click count.
 For games and apps that throttle input, **500-2,000 CPS** usually registers
 more reliably than an extreme setting.
+
+If the target is the bottleneck, nothing on the sending side can add clicks
+that the app refuses to process. What helps is where the clicks go: **Direct
+message** delivery posts button messages straight to the window, which
+bypasses the input stack and works while another window has focus, at the cost
+of only working with classic Win32 windows.
+
+## Prior art and credits
+
+The pacing model here was chosen after reading how other Windows clickers are
+built and what they measured. Credit to those projects:
+
+| Project | Licence | What ClickStorm took from it |
+| --- | --- | --- |
+| [local764larp/auto-clicker](https://github.com/local764larp/auto-clicker) | none declared | The delivered-CPS benchmark that showed batched arrays lose 22% of delivered clicks, and the timer / yield / spin wait tiers. Measurements and design ideas only. |
+| [chris101-dev/ColibriTap](https://github.com/chris101-dev/ColibriTap) | MIT | Drift-free scheduling against an absolute deadline instead of `sleep(interval)`. |
+| [PriyanshuGeTRekT/WinClicker](https://github.com/PriyanshuGeTRekT/WinClicker) | MIT | Clicking a window in the background with posted button messages (our **Direct message** mode). |
+| [Blur009/Blur-AutoClicker](https://github.com/Blur009/Blur-AutoClicker) | GPL-3.0 | Feature ideas only (click/time limits, position clicking). No code is reused: GPL-3.0 is not compatible with this project's MIT licence. |
+
+No source code was copied from any of them. Where a project's licence would
+not permit reuse, only published measurements, behaviour and design ideas were
+used. ClickStorm remains MIT (see [LICENSE](LICENSE)).
+
+Deliberately **not** used: kernel-mode input drivers such as
+[Interception](https://github.com/oblitum/Interception). They would lift the
+ceiling for some targets, but they need an administrator-installed, signed
+driver and break the "single portable exe, no dependencies" promise.
 
 ## Settings and files
 
@@ -216,7 +251,7 @@ MIT. See [LICENSE](LICENSE).
 ```
 clickstorm.py            Entry point (used by AutoClicker.spec)
 clickstorm/app.py        Main window, hotkeys, session control
-clickstorm/engine.py     Click engine: pacing, batching, exact targets
+clickstorm/engine.py     Click engine: timeline, per-click delivery, exact targets
 clickstorm/winapi.py     Dependency-free Win32 layer (SendInput, cursor, keys)
 clickstorm/settings.py   Persistent settings + migration
 clickstorm/settings_dialog.py  Advanced settings window
@@ -235,8 +270,8 @@ installer/ClickStorm.iss Inno Setup installer recipe
   many games ignore input delivered faster than their loop can consume.
 - **Clicks do nothing in an elevated app.** Rights are not inherited: run
   `ClickStorm.exe` as administrator as well.
-- **Stopping feels delayed at extreme rates.** Stop is checked on every 1 ms
-  slot and every `SendInput` call, but a backed-up input queue can still take
+- **Stopping feels delayed at extreme rates.** Stop is checked between every
+  click and every `SendInput` call, but a backed-up input queue can still take
   a moment to drain.
 - **Windows SmartScreen warns about the installer.** The build is not code
   signed, so choose "More info" → "Run anyway".

@@ -149,7 +149,7 @@ class SettingsDialog(tk.Toplevel):
         inner = self._section(parent, "Delivery")
         self.delivery_segment = theme.SegmentedControl(
             inner,
-            options=(("sendinput", "TURBO SENDINPUT"), ("direct", "DIRECT MESSAGE")),
+            options=(("sendinput", "SENDINPUT (FASTEST)"), ("direct", "DIRECT MESSAGE")),
             variable=self.delivery_var,
             bg=COLORS["card"],
             button_width=154,
@@ -170,7 +170,7 @@ class SettingsDialog(tk.Toplevel):
         inner = self._section(
             parent,
             "Timing",
-            "Precision pacing uses a 1 ms Windows timer and a dedicated thread.",
+            "Precision pacing uses a high-resolution timer and a dedicated thread.",
         )
         row = tk.Frame(inner, bg=COLORS["card"])
         row.pack(fill="x", pady=(8, 0))
@@ -304,7 +304,7 @@ class SettingsDialog(tk.Toplevel):
         ).pack(anchor="w", pady=4)
         theme.make_label(
             inner,
-            "ClickStorm asks Windows for a 1 ms timer only while clicking.",
+            "ClickStorm asks Windows for a high-resolution timer only while clicking.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
         ).pack(anchor="w", pady=(6, 0))
 
@@ -343,7 +343,7 @@ class SettingsDialog(tk.Toplevel):
 
         theme.make_label(
             inner,
-            f"{APP_NAME} v{APP_VERSION}  |  Win32 batched input",
+            f"{APP_NAME} v{APP_VERSION}  |  Win32 per-click input",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
         ).pack(anchor="w", pady=(2, 0))
         path_text = str(settings_path())

@@ -45,7 +45,7 @@ python -m pip install "pyinstaller>=6.10,<7"
 | --- | --- |
 | `clickstorm.py` | Entry point (also used by the PyInstaller spec) |
 | `clickstorm/app.py` | Main window, session control, global hotkeys |
-| `clickstorm/engine.py` | Click engine: pacing, batching, exact targets |
+| `clickstorm/engine.py` | Click engine: pacing, per-click delivery, exact targets |
 | `clickstorm/winapi.py` | Win32 declarations and helpers (SendInput, cursor, keys) |
 | `clickstorm/settings.py` | Settings persistence and migrations |
 | `clickstorm/settings_dialog.py` | Advanced settings window |
@@ -61,16 +61,20 @@ properties when changing it:
 
 - **Never click on the UI thread.** Tk is only touched from the main thread;
   the worker communicates through `poll_events()` and `get_stats()`.
-- **Small `SendInput` arrays.** Large arrays make `SendInput` block while the
-  target drains its input queue, which shows up as a low click rate and a
-  sluggish STOP. Keep bursts small and adaptive.
+- **One click per `SendInput` call.** Batching many clicks into one array
+  raises the emitted rate but *lowers* the delivered rate: batched clicks
+  carry no spacing and the input stack coalesces them before the target's
+  message loop sees them. The engine therefore sends a single DOWN/UP pair per
+  call and only puts more than one click in flight when the requested rate
+  needs it (see "Prior art" in README.md for the measurement).
 - **Exact click targets.** Click credit is only spent on clicks Windows
   accepted. Rejected clicks must stay due and be retried rather than silently
   dropped.
 - **Responsive stop.** Stop, duration and target are checked between sends, so
   a turn must stay short even at high rates.
 - **No giant catch-up bursts.** If the target is slow, the run should slow
-  down; do not fire a backlog at it.
+  down; do not fire a backlog at it. Catch-up clicks are still sent one call
+  at a time, and backlog beyond 50 ms is counted and dropped.
 
 `clickstorm` must remain standard-library only. If a feature needs a dependency,
 discuss it in an issue first.
@@ -131,7 +135,7 @@ the spec is what keeps Windows from opening a console window.
 The Inno Setup script takes the app version and target architecture as defines:
 
 ```bat
-iscc /DMyAppArch=x64 /DMyAppVersion=3.0.0 installer\ClickStorm.iss
+iscc /DMyAppArch=x64 /DMyAppVersion=3.1.0 installer\ClickStorm.iss
 ```
 
 `MyAppArch` is `x64`, `x86` (32-bit) or `arm64`. Output:
@@ -170,15 +174,15 @@ Release procedure:
 4. Tag and push the tag:
 
    ```bat
-   git tag v3.0.0
-   git push origin v3.0.0
+   git tag v3.1.0
+   git push origin v3.1.0
    ```
 
    Without local git credentials, push a release branch instead — it publishes
    the same way and also creates the tag:
 
    ```bat
-   git push origin main:release/v3.0.0
+   git push origin main:release/v3.1.0
    ```
 
    Or run the workflow from the Actions UI with **publish** enabled.

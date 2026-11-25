@@ -71,7 +71,7 @@ THREAD_PRIORITY_HIGHEST = 2
 THREAD_PRIORITY_TIME_CRITICAL = 15
 
 # CreateWaitableTimerEx flags (Windows 10 1803+): a timer that can wake a
-# thread on a sub-millisecond deadline, which keeps the 1 ms click grid
+# thread on a sub-millisecond deadline, which keeps the click timeline
 # accurate without spinning a whole core for every millisecond.
 CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002
 TIMER_ALL_ACCESS = 0x1F0003
@@ -123,6 +123,19 @@ class RECT(ctypes.Structure):
         ("right", wintypes.LONG),
         ("bottom", wintypes.LONG),
     ]
+
+
+class THREAD_POWER_THROTTLING_STATE(ctypes.Structure):
+    _fields_ = [
+        ("Version", wintypes.ULONG),
+        ("ControlMask", wintypes.ULONG),
+        ("StateMask", wintypes.ULONG),
+    ]
+
+
+THREAD_POWER_THROTTLING_CURRENT_VERSION = 1
+THREAD_POWER_THROTTLING_EXECUTION_SPEED = 0x1
+THREAD_INFORMATION_CLASS_POWER_THROTTLING = 1
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +209,17 @@ kernel32.SetThreadPriority.restype = wintypes.BOOL
 kernel32.GetCurrentProcess.restype = wintypes.HANDLE
 kernel32.SetPriorityClass.argtypes = (wintypes.HANDLE, wintypes.DWORD)
 kernel32.SetPriorityClass.restype = wintypes.BOOL
+
+kernel32.SwitchToThread.argtypes = ()
+kernel32.SwitchToThread.restype = wintypes.BOOL
+
+kernel32.SetThreadInformation.argtypes = (
+    wintypes.HANDLE,
+    ctypes.c_int,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+)
+kernel32.SetThreadInformation.restype = wintypes.BOOL
 
 kernel32.CreateWaitableTimerExW.argtypes = (
     ctypes.c_void_p,
@@ -281,7 +305,7 @@ def send_inputs(inputs, event_count: int) -> tuple[int, int]:
 
 
 def send_button_release(button: str) -> int:
-    """Send an extra button-up event (used to guard against partial batches)."""
+    """Send an extra button-up event (guards a partially accepted click)."""
     down_flag, up_flag, mouse_data = button_spec(button)
     inp = (INPUT * 1)()
     inp[0].type = INPUT_MOUSE
@@ -508,6 +532,41 @@ def reset_thread_priority() -> bool:
     )
 
 
+def disable_power_throttling() -> bool:
+    """Opt this thread out of ecoQoS execution-speed throttling.
+
+    Windows 11 can schedule a CPU-hungry thread onto a low-power core and
+    clamp its clock. The click thread is short-lived bursts of work that must
+    land on a millisecond timeline, so it asks for full speed for as long as
+    the session runs. Unavailable before Windows 10 1709; failure is ignored.
+    """
+    state = THREAD_POWER_THROTTLING_STATE(
+        THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        0,
+    )
+    try:
+        return bool(
+            kernel32.SetThreadInformation(
+                kernel32.GetCurrentThread(),
+                THREAD_INFORMATION_CLASS_POWER_THROTTLING,
+                ctypes.byref(state),
+                ctypes.sizeof(state),
+            )
+        )
+    except Exception:
+        return False
+
+
+def switch_to_thread() -> bool:
+    """Yield the rest of this thread's timeslice and return immediately."""
+    try:
+        return bool(kernel32.SwitchToThread())
+    except Exception:
+        time.sleep(0)
+        return False
+
+
 def set_process_priority(high: bool = True) -> bool:
     priority = HIGH_PRIORITY_CLASS if high else ABOVE_NORMAL_PRIORITY_CLASS
     return bool(kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), priority))
@@ -517,10 +576,10 @@ class HighResTimer:
     """One-shot high-resolution waitable timer.
 
     ``sleep`` blocks for roughly the requested time and is used by the click
-    engine to cover most of each 1 ms slot; the engine spins the remainder.
-    Falls back to ``time.sleep`` when the OS cannot create a high-resolution
-    timer (before Windows 10 1803), where the 1 ms ``timeBeginPeriod``
-    request still applies.
+    engine for the long tier of its wait; the engine yields and then spins
+    the last 50 us itself. Falls back to ``time.sleep`` when the OS cannot
+    create a high-resolution timer (before Windows 10 1803), where the 1 ms
+    ``timeBeginPeriod`` request still applies.
     """
 
     def __init__(self) -> None:

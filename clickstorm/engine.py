@@ -2,33 +2,45 @@
 
 Pacing model
 ------------
-Clicks are scheduled on a 1 ms grid.  The configured rate is converted once to
-``clicks_per_ms = cps / 1000`` and every grid slot adds that much credit to a
-float bank, so a rate that is not a whole number of clicks per millisecond
-(e.g. 1,234 CPS -> 1.234 clicks/ms) keeps its fraction instead of drifting.
-Whole clicks are paid out as one ``SendInput`` call; the fraction stays in the
-bank for the next slot.
+Clicks are scheduled on an absolute timeline: click *n* is due at
+``start + n / cps``.  The timeline is a float, so a rate that is not a whole
+number of clicks per millisecond keeps its fraction instead of drifting, and
+the first click fires immediately when the run starts.
+
+One click per call
+------------------
+Every click is submitted in its own ``SendInput`` call.  Packing many clicks
+into one array raises the *emitted* rate (fewer syscalls) but lowers the
+*delivered* rate: batched clicks carry no spacing, and the system input stack
+coalesces them before the receiving application's message loop sees them.  An
+independent Windows benchmark measured emitted +36% with delivered -22% and
+fidelity falling from 99% to 57% for batched arrays (see "Prior art" in
+README.md), so the engine sends one DOWN/UP pair per call and only ever puts
+several clicks in flight when the requested rate genuinely needs it.
 
 Catch-up
 --------
-Every slot has an absolute deadline on ``perf_counter()``.  When a turn wakes
-late (timer overshoot, a busy core, a swamped target window) the number of
-slots that were missed is computed from the clock and their clicks are added
-to the same bank.  One missed millisecond at 25,000 CPS therefore becomes a
-50-click batch on the next turn (two missed milliseconds -> 50 extra clicks)
-instead of being lost.  Credit beyond ``MAX_CATCHUP_MS`` is dropped so a
-multi-second stall cannot turn into an unbounded burst.
+When a turn wakes late, every click whose deadline has passed is due now.
+They are sent as separate single-click calls, so a stalled millisecond is
+repaid without being coalesced, and the schedule resumes on its original
+timeline.  Backlog beyond ``MAX_CATCHUP_MS`` is dropped so a multi-second
+stall cannot turn into an unbounded burst.
+
+Waiting
+-------
+A three-tier wait keeps the timeline without pinning the CPU: a
+high-resolution waitable timer covers gaps above 2 ms, ``SwitchToThread``
+yields between 2 ms and 50 us, and the loop only spins the last 50 us.
 
 Delivery
 --------
-Credit is only spent on clicks Windows actually accepted: a rejected shortfall
-goes back into the bank and is retried on the next slot.  The INPUT array is
-built once per session and reused by every call; the hot loop allocates
-nothing, prints nothing and takes no locks, and it only uses a smaller event
-count when it needs a smaller batch.
+Credit is only spent on clicks Windows actually accepted: a rejected click is
+not counted and is retried on the next turn, so a run still ends on the exact
+target.  The INPUT array is built once per session and reused; the hot loop
+allocates nothing, prints nothing and takes no locks.
 
 The thread is independent of Tk, so the UI and the global hotkeys stay
-responsive and STOP takes effect within one millisecond slot.
+responsive and STOP takes effect between two clicks.
 """
 
 from __future__ import annotations
@@ -42,23 +54,21 @@ from . import winapi
 
 
 MIN_CPS = 1.0
-# SendInput injects through one system input thread. Benchmarks of native
-# clickers put delivered input at roughly 2,000-4,000 CPS, so 25,000 is the
-# highest target worth offering: it lets a fast machine run flat out, and the
-# 25 clicks/ms schedule is the example the pacing math is designed around.
+# Requested rates above ~4,000 CPS cannot be delivered by Windows: SendInput
+# serialises through the system input thread and the receiving application
+# consumes on its own message loop, so the receiver is the bottleneck.  The
+# ceiling is offered as a "run flat out" setting rather than a promise.
 MAX_CPS = 25_000.0
 MAX_CLICKS = 25_000
 MAX_DURATION = 86_400.0
 
-# The scheduling grid. One slot is one millisecond.
-TICK_SECONDS = 0.001
-# A stall longer than this many slots is treated as a real freeze: the excess
-# credit is dropped instead of fired at the target as one huge burst.
+# A stall longer than this many milliseconds is treated as a real freeze: the
+# excess backlog is dropped instead of fired at the target as one huge burst.
 MAX_CATCHUP_MS = 50
-# Reusable INPUT arrays are sized for this many clicks and never reallocated.
-MAX_CHUNK_CLICKS = 64
-MIN_CHUNK_CLICKS = 2
-INITIAL_CHUNK_CLICKS = 16
+# Wait tiers, in seconds. Above YIELD the timer sleeps, between SPIN and YIELD
+# the thread yields its timeslice, below SPIN it spins.
+YIELD_SECONDS = 0.002
+SPIN_SECONDS = 0.00005
 # Keep retrying through a temporarily swamped input queue (about 0.4 s)
 # before abandoning a run, so a brief stall cannot cut a target short.
 MAX_CONSECUTIVE_FAILURES = 200
@@ -334,6 +344,10 @@ class ClickEngine:
         timer = winapi.HighResTimer()
         if config.performance_mode:
             winapi.set_thread_priority(True)
+            # Windows 11 may move a busy thread onto an ecoQoS low-power core;
+            # opting out of execution-speed throttling keeps the timeline on a
+            # full-speed core. Harmless where the API is unavailable.
+            winapi.disable_power_throttling()
 
         target_clicks = (
             config.click_limit if config.limit_mode == "clicks" else None
@@ -342,13 +356,12 @@ class ClickEngine:
             config.duration if config.limit_mode == "duration" else None
         )
 
+        fixed_x = fixed_y = 0
         if config.position_mode == "fixed":
             fixed_x, fixed_y = winapi.clamp_to_screen(
                 config.fixed_x, config.fixed_y
             )
             winapi.set_cursor_pos(fixed_x, fixed_y)
-        else:
-            fixed_x = fixed_y = 0
 
         direct_target = None
         direct_point = None
@@ -362,25 +375,25 @@ class ClickEngine:
                     winapi.focus_target(direct_target)
                 direct_point = point
 
-        # Built once per session. Every SendInput call reuses this array and
-        # simply passes a smaller event count, so the loop never allocates.
+        # One click per call: a single DOWN/UP pair, built once and reused, so
+        # the hot loop never allocates and no two clicks are ever coalesced.
         click_array = (
-            winapi.build_click_inputs(config.button, MAX_CHUNK_CLICKS)
+            winapi.build_click_inputs(config.button, 1)
             if config.delivery == "sendinput"
             else None
         )
 
-        cps_per_ms = config.cps / 1000.0
-        max_bank = max(1.0, cps_per_ms * MAX_CATCHUP_MS)
+        interval = 1.0 / config.cps
+        # Clicks that may be repaid after a stall (e.g. 1,250 at 25,000 CPS).
+        max_catchup = max(1, int(config.cps * (MAX_CATCHUP_MS / 1000.0)))
         jitter = config.jitter_percent
-        chunk = INITIAL_CHUNK_CLICKS
-        clean_bursts = 0
         failures = 0
-        bank = 0.0
         start = time.perf_counter()
-        deadline = start + TICK_SECONDS
+        next_at = start
         reason = "stopped"
         message = ""
+        lock_every = max(1, int(config.cps // 500) + 1)
+        since_lock = 0
 
         try:
             while True:
@@ -389,32 +402,11 @@ class ClickEngine:
                     reason = "stopped"
                     break
 
-                if time.perf_counter() < deadline and not self._wait_until(
-                    deadline, timer
-                ):
+                if not self._wait_until(next_at, timer):
                     reason = "stopped"
                     break
 
-                # How many whole 1 ms slots are due right now? A late wake-up
-                # makes this larger; those extra slots are the empty
-                # milliseconds we owe the run, and their clicks are paid out
-                # together with this turn's batch (2 ms missed at 25,000 CPS
-                # -> 50 clicks in one SendInput call).
                 now = time.perf_counter()
-                behind = now - deadline
-                slots = 1 + int(behind / TICK_SECONDS) if behind > 0.0 else 1
-                if slots > 1:
-                    self._late_ticks += slots - 1
-                    if slots > MAX_CATCHUP_MS:
-                        self._dropped_clicks += int(
-                            cps_per_ms * (slots - MAX_CATCHUP_MS)
-                        )
-                        slots = MAX_CATCHUP_MS
-                        deadline = now + TICK_SECONDS
-                    else:
-                        deadline += slots * TICK_SECONDS
-                else:
-                    deadline += TICK_SECONDS
 
                 if duration is not None and now - start >= duration:
                     reason = "duration"
@@ -426,140 +418,124 @@ class ClickEngine:
                     reason = "target"
                     break
 
+                # Every click whose deadline has passed is due now. A late
+                # wake-up (timer overshoot, busy core, swamped target) makes
+                # this larger; those clicks are owed to the run and are paid
+                # out as separate calls so they keep their own DOWN/UP pairs.
+                late = now - next_at
+                due = 1 + int(late / interval) if late > 0.0 else 1
+                lagging = due > max_catchup
+                if lagging:
+                    # A real freeze: drop the excess and restart the cadence
+                    # from now instead of firing an unbounded burst.
+                    self._dropped_clicks += due - max_catchup
+                    due = max_catchup
+                elif due > 1:
+                    self._late_ticks += due - 1
+
+                step = interval
                 if jitter > 0.0:
-                    bank += (
-                        cps_per_ms
-                        * slots
-                        * (1.0 + random.uniform(-jitter, jitter))
-                    )
+                    step = interval * (1.0 + random.uniform(-jitter, jitter))
+                if lagging:
+                    next_at = now + step
                 else:
-                    bank += cps_per_ms * slots
-                if bank > max_bank:
-                    bank = max_bank
+                    next_at += due * step
 
-                due = int(bank)
-                if due <= 0:
-                    # Below one click per millisecond: skip the slots that
-                    # cannot produce a click instead of waking 1,000 times a
-                    # second for nothing. Their credit is added up front.
-                    if cps_per_ms < 1.0:
-                        extra = int((1.0 - bank) / cps_per_ms)
-                        if extra > 0:
-                            bank += cps_per_ms * extra
-                            deadline += extra * TICK_SECONDS
-                    continue
-
-                bank -= due
                 if target_clicks is not None:
                     left = target_clicks - self._clicks_sent
                     if due > left:
-                        # The run ends on this batch: the surplus never reaches
-                        # the target and must not be reported as requested.
+                        # The run ends on this turn: surplus clicks never
+                        # reach the target and are not reported as requested.
                         due = left
                     if due <= 0:
                         reason = "target"
                         break
                 self._clicks_requested += due
 
-                if config.position_mode == "fixed":
+                since_lock += 1
+                if config.position_mode == "fixed" and since_lock >= lock_every:
                     winapi.keep_cursor_locked(fixed_x, fixed_y)
+                    since_lock = 0
 
                 accepted_total = 0
                 calls = 0
                 detail = ""
-                remaining = due
 
-                if click_array is not None:
-                    while remaining > 0:
-                        if self._shutdown or self._stop_requested:
-                            break
-                        size = chunk if chunk < remaining else remaining
-                        sent, error = winapi.send_inputs(click_array, size * 2)
-                        accepted = sent >> 1
-                        if accepted > size:
-                            accepted = size
-                        if sent & 1:
-                            # A partial batch can leave the button held down.
-                            winapi.send_button_release(config.button)
+                for _ in range(due):
+                    if self._shutdown or self._stop_requested:
+                        break
+
+                    if click_array is not None:
+                        events, error = winapi.send_inputs(click_array, 2)
                         calls += 1
-                        accepted_total += accepted
-                        remaining -= accepted
-                        if accepted == size:
-                            clean_bursts += 1
-                            if (
-                                clean_bursts >= 16
-                                and chunk < MAX_CHUNK_CLICKS
-                            ):
-                                chunk += 4
-                                if chunk > MAX_CHUNK_CLICKS:
-                                    chunk = MAX_CHUNK_CLICKS
-                                clean_bursts = 0
-                        else:
-                            # Windows started rejecting events: use smaller
-                            # arrays so the input queue can drain again.
-                            if chunk > MIN_CHUNK_CLICKS:
-                                chunk >>= 1
-                                if chunk < MIN_CHUNK_CLICKS:
-                                    chunk = MIN_CHUNK_CLICKS
-                            clean_bursts = 0
-                            detail = (
-                                "Windows rejected injected input"
-                                + (f" (error {error})" if error else "")
-                                + ". If the target is running elevated, run "
-                                "ClickStorm as administrator."
-                            )
-                            break
-                else:
-                    point = self._point(config, fixed_x, fixed_y)
-                    if point is None:
-                        detail = "Could not read the cursor position."
+                        if events == 2:
+                            accepted_total += 1
+                            continue
+                        # A partial batch can leave the button held down.
+                        if events & 1:
+                            winapi.send_button_release(config.button)
+                        detail = (
+                            "Windows rejected injected input"
+                            + (f" (error {error})" if error else "")
+                            + ". If the target is running elevated, run "
+                            "ClickStorm as administrator."
+                        )
                     else:
-                        if point != direct_point:
-                            direct_target = winapi.make_direct_target(
-                                point[0], point[1], config.button
-                            )
-                            direct_point = point
-                            if direct_target is not None:
-                                winapi.focus_target(direct_target)
-                        if direct_target is None:
-                            detail = (
-                                "No clickable window was found under the cursor."
-                            )
+                        point = self._point(config, fixed_x, fixed_y)
+                        if point is None:
+                            detail = "Could not read the cursor position."
                         else:
-                            accepted = 0
-                            for _ in range(remaining):
-                                if self._shutdown or self._stop_requested:
-                                    break
-                                if winapi.post_click(direct_target):
-                                    accepted += 1
-                            accepted_total = accepted
-                            calls = accepted
-                            remaining -= accepted
-                            if remaining:
+                            if point != direct_point:
+                                direct_target = winapi.make_direct_target(
+                                    point[0], point[1], config.button
+                                )
+                                direct_point = point
+                                if direct_target is not None:
+                                    winapi.focus_target(direct_target)
+                            if direct_target is None:
                                 detail = (
-                                    "The target window rejected some posted "
-                                    "clicks. Try SendInput delivery instead."
+                                    "No clickable window was found under the "
+                                    "cursor."
+                                )
+                            else:
+                                calls += 1
+                                if winapi.post_click(direct_target):
+                                    accepted_total += 1
+                                    continue
+                                detail = (
+                                    "The target window rejected posted clicks. "
+                                    "Try SendInput delivery instead."
                                 )
 
-                if remaining > 0:
-                    # Only accepted clicks are paid for. The shortfall stays
-                    # in the bank and is retried on the next 1 ms slot.
-                    bank += remaining
+                    # The input queue is full: stop filling it and let it drain
+                    # instead of burning the rest of this turn's budget.
+                    break
+
+                shortfall = due - accepted_total
+                if shortfall > 0:
+                    # Only accepted clicks are paid for. The shortfall keeps
+                    # its deadline, so it is retried on the next turn.
+                    next_at -= shortfall * step
+                    self._failed_events += shortfall * 2
+                    if accepted_total == 0:
+                        # Nothing got through: give the queue a moment instead
+                        # of spinning on a refused call.
+                        winapi.switch_to_thread()
+                        time.sleep(0.001)
 
                 self._clicks_sent += accepted_total
                 self._input_events += accepted_total * 2
                 self._send_calls += calls
                 self._batches += 1
-                self._failed_events += remaining * 2
-                if slots > 1:
+                if due > 1 and accepted_total:
                     self._catchup_clicks += accepted_total
 
                 if accepted_total:
                     failures = 0
                     if detail:
                         self._last_error = detail
-                    elif remaining == 0:
-                        # A clean batch clears a message left by an earlier
+                    elif shortfall == 0:
+                        # A clean turn clears a message left by an earlier
                         # rejection so the UI never shows a stale error.
                         self._last_error = ""
                 else:
@@ -572,7 +548,6 @@ class ClickEngine:
                             detail or "Windows rejected every injected click."
                         )
                         break
-                    time.sleep(0.002)
 
                 if (
                     target_clicks is not None
@@ -620,10 +595,11 @@ class ClickEngine:
     def _wait_until(self, deadline: float, timer) -> bool:
         """Wait for ``deadline``. Returns False when a stop is requested.
 
-        A high-resolution waitable timer covers most of the gap and the loop
-        spins only the last few hundred microseconds, which is the cheapest
-        way to hold a 1 ms grid without burning an entire core. Oversleeping
-        is harmless: the catch-up slot count repays it on the next turn.
+        Three tiers, so the wait is cheap but still lands on the timeline: the
+        high-resolution waitable timer sleeps through anything longer than
+        2 ms, ``SwitchToThread`` yields between 2 ms and 50 us, and the last
+        50 us are spun. Oversleeping is harmless: the due-click count repays
+        it on the next turn.
         """
         while True:
             if self._shutdown or self._stop_requested:
@@ -631,8 +607,10 @@ class ClickEngine:
             remaining = deadline - time.perf_counter()
             if remaining <= 0.0:
                 return True
-            if remaining > 0.0005:
-                timer.sleep(remaining - 0.0004)
+            if remaining > YIELD_SECONDS:
+                timer.sleep(remaining - YIELD_SECONDS + 0.0002)
+            elif remaining > SPIN_SECONDS:
+                winapi.switch_to_thread()
             else:
                 while time.perf_counter() < deadline:
                     if self._shutdown or self._stop_requested:
