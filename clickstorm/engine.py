@@ -748,8 +748,6 @@ class UltimateEngine:
     is delivering right now.
     """
 
-    backend_name = "Ultimate"
-
     _COUNTERS = (
         "clicks_sent",
         "clicks_requested",

@@ -152,7 +152,7 @@ THREAD_PRIORITY_ABOVE_NORMAL = 1
 VK_F6 = 0x75
 VK_ESCAPE = 0x1B
 
-__version__ = "4.6.1"  # keep in sync with clickstorm/__init__.py
+__version__ = "4.6.2"  # keep in sync with clickstorm/__init__.py
 
 DEFAULT_CPS = 5_000.0
 MAX_CPS = 5_000.0
@@ -469,8 +469,6 @@ class SharedGauntlet:
     def error(self) -> str:
         if self._error:
             return self._error
-        if self._armed_flag:
-            return ""
         stats = self._engine.get_stats()
         if stats.state == "error" and stats.last_error:
             return stats.last_error
@@ -481,7 +479,7 @@ class SharedGauntlet:
         pass
 
     def arm(self) -> None:
-        if self.armed:
+        if self._armed_flag:
             return
         self._error = ""
         if not self._engine.start(self._config):
@@ -494,11 +492,11 @@ class SharedGauntlet:
         self._engine.stop()
 
     def toggle(self) -> bool:
-        if self.armed:
+        if self._armed_flag:
             self.disarm()
         else:
             self.arm()
-        return self.armed
+        return self._armed_flag
 
     def stop(self) -> None:
         self._armed_flag = False

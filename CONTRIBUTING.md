@@ -136,6 +136,10 @@ Then check the behaviour you touched manually:
 - Click-target mode ends exactly on the target; duration mode ends on time.
 - Test at low (10 CPS), normal (500-1,000 CPS) and high (4,000-5,000 CPS)
   rates; 5,000 is the cap.
+- For delivery or batching changes, run
+  `python tools/ci_delivery_check.py` on Windows. It loads the native core,
+  starts `tools/click_counter.py`, and verifies the delivered SENDINPUT rate
+  plus SYNC click registration.
 - Verify follow-cursor and fixed-point modes.
 - Confirm the app keeps its icon, DPI scaling and saved window geometry.
 

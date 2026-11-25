@@ -201,6 +201,12 @@ ARM64 builds natively on the `windows-11-arm` runner and is allowed to fail
 without holding back the x64/x86 release. A manual run without **publish**
 produces the same installers as downloadable build artifacts only.
 
+A **Delivered-CPS test** job runs on `windows-latest` before the release job.
+It builds the native core and starts `tools/click_counter.py` in its own
+window, then drives the engine at a 5,000 CPS target. The release is blocked
+unless the Rust core is the one clicking, SENDINPUT delivers at least 4,000
+clicks per second, and SYNC registers essentially every click it asks for.
+
 ## Updates
 
 Click **UPDATES** in the title bar to check the latest GitHub release. The
@@ -451,6 +457,13 @@ installer/ClickStorm.iss Inno Setup installer recipe
 - **DIRECT clicks do nothing in a game or a custom-drawn window.** Those apps
   do not act on `WM_*BUTTON*` messages; they read raw input. Use SYNC or
   SENDINPUT there.
+- **"Failed to load Python DLL" after an in-app update.** The relaunched app
+  inherited the old onefile's extraction folder, which is deleted when the old
+  process exits. 4.6.2 clears PyInstaller's private `_PYI_*` variables, sets
+  `PYINSTALLER_RESET_ENVIRONMENT=1` and pins TEMP/TMP before starting the
+  installer, and the installer launches ClickStorm through Explorer so it
+  gets the user's clean environment. That also fixes the relaunch when the
+  installer was started by an older ClickStorm build.
 - **The update reported a missing module.** 4.0.1 starts the downloaded
   installer without inheriting the windowed app's absent std handles (that
   call was the failure), and every update failure is now written to

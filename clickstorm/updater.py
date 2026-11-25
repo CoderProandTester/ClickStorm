@@ -107,17 +107,19 @@ def is_newer(remote: str, local: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def current_architecture() -> str:
-    """Return ``x64``, ``x86`` or ``arm64`` for this process."""
+    """Return ``x64``, ``x86`` or ``arm64`` for this build.
+
+    Pointer width comes first. ``platform.machine()`` reports the *OS*
+    architecture on Windows, so a 32-bit build running on 64-bit Windows used
+    to be offered the x64 installer - replacing an x86 install in place with
+    a different architecture.
+    """
+    if struct.calcsize("P") == 4:
+        return "x86"
     machine = (platform.machine() or "").lower()
     if machine in ("arm64", "aarch64"):
         return "arm64"
-    if machine in ("amd64", "x86_64", "x64"):
-        return "x64"
-    if machine in ("x86", "i386", "i686", "i586"):
-        return "x86"
-    # Fall back to the pointer width: a 32-bit build reports a 4-byte pointer
-    # even on a 64-bit machine, which matches the installer it can run.
-    return "x64" if struct.calcsize("P") == 8 else "x86"
+    return "x64"
 
 
 def asset_architecture(name: str) -> str:
@@ -271,6 +273,43 @@ def download_installer(asset: ReleaseAsset, on_progress=None) -> Path:
     return target
 
 
+# PyInstaller's onefile bootloader passes the location of its extraction
+# folder to child processes through private _PYI_* variables. A process that
+# outlives ClickStorm - the installer, and the new ClickStorm the installer
+# launches - must not reuse that folder: it is deleted when this process
+# exits, and the new app then fails with "Failed to load Python DLL".
+_PYINSTALLER_PRIVATE_ENV = (
+    "_MEIPASS2",
+    "_PYI_APPLICATION_HOME_DIR",
+    "_PYI_ARCHIVE_FILE",
+    "_PYI_PARENT_PROCESS_LEVEL",
+    "_PYI_SPLASH_IPC",
+)
+
+
+def _installer_environment() -> dict[str, str]:
+    """Environment for the installer and the app it relaunches.
+
+    Drops the inherited onefile extraction variables and asks PyInstaller to
+    treat the relaunched app as a fresh top-level process, so it unpacks its
+    own copy instead of pointing at the folder this process is about to
+    delete. TEMP/TMP are pinned to the user's real temp folder for the same
+    reason: the installer must not hand the new app a temp folder that setup
+    removes on exit.
+    """
+    env = os.environ.copy()
+    for name in _PYINSTALLER_PRIVATE_ENV:
+        env.pop(name, None)
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    local_app_data = env.get("LOCALAPPDATA")
+    if local_app_data:
+        temp = os.path.join(local_app_data, "Temp")
+        if os.path.isdir(temp):
+            env["TEMP"] = temp
+            env["TMP"] = temp
+    return env
+
+
 def launch_installer(path: Path) -> None:
     """Start a downloaded installer as its own process."""
     installer = str(path)
@@ -288,6 +327,7 @@ def launch_installer(path: Path) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             close_fds=True,
+            env=_installer_environment(),
         )
     except Exception as exc:
         raise UpdateError(f"Could not start the installer: {exc}") from exc

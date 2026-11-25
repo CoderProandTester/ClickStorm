@@ -6,36 +6,52 @@ target registered - not the rate ClickStorm asked for.
 
     python tools\\click_counter.py
 
-In ClickStorm, point at this window and start a run. SendInput delivery sends
-real mouse input; Direct posts button messages; SYNC sends them synchronously
-and waits for this window to handle each one; AUTO picks SYNC above 6,000 CPS.
-All of them are counted here. The "unpaired" figure is the number of downs
-without a matching up: a non-zero value that keeps growing means a receiver
-dropped the release, which is what a latched mouse button looks like.
+In ClickStorm, point at this window and start a run. SYNC and SENDINPUT both
+inject real mouse input; DIRECT posts button messages. All of them are counted
+here. The "unpaired" figure is the number of downs without a matching up: a
+non-zero value that keeps growing means a receiver dropped the release, which
+is what a latched mouse button looks like.
 
-The counter is a separate process on purpose: ClickStorm refuses to post
-clicks into its own windows, so the app's own window can never be the target.
+For automated checks, ``--report PATH`` writes the live totals as JSON every
+refresh so a harness can read the delivered count without scraping the window:
+
+    python tools\\click_counter.py --report counter.json
+
+The counter is a separate process on purpose: ClickStorm's DIRECT mode refuses
+to post clicks into its own windows, so the app's own window can never be the
+target.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
+import os
 import time
 import tkinter as tk
 from collections import deque
+from pathlib import Path
 
 WINDOW_SECONDS = 2.0
 REFRESH_MS = 100
+WINDOW_TITLE = "ClickStorm - delivered CPS counter"
 
 
 class ClickCounter:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        report_path: Path | None = None,
+        title: str = WINDOW_TITLE,
+    ) -> None:
         self.root = root
+        self.report_path = Path(report_path) if report_path else None
         self.downs = 0
         self.ups = 0
         self.recent: deque[float] = deque()
         self.started = time.perf_counter()
 
-        root.title("ClickStorm - delivered CPS counter")
+        root.title(title)
         root.configure(bg="#0b1418")
         root.geometry("560x360")
         root.attributes("-topmost", True)
@@ -72,8 +88,8 @@ class ClickCounter:
         tk.Label(
             frame,
             text=(
-                "Click this window with ClickStorm. SendInput, Direct, SYNC "
-                "and AUTO are all counted.\nThe count is what Windows "
+                "Click this window with ClickStorm. SYNC, SENDINPUT and "
+                "DIRECT are all counted.\\nThe count is what Windows "
                 "delivered to this app, not what was requested."
             ),
             bg="#0b1418",
@@ -101,6 +117,7 @@ class ClickCounter:
         root.bind_all("<Button-1>", self._on_down, add="+")
         root.bind_all("<ButtonRelease-1>", self._on_up, add="+")
         root.protocol("WM_DELETE_WINDOW", root.destroy)
+        self._write_report(0.0)
         self._tick()
 
     def _on_down(self, _event=None) -> None:
@@ -122,6 +139,27 @@ class ClickCounter:
         self.ups = 0
         self.recent.clear()
         self.started = time.perf_counter()
+        self._write_report(0.0)
+
+    def _write_report(self, cps: float) -> None:
+        """Publish the counters for the Windows CI delivery check."""
+        if self.report_path is None:
+            return
+        payload = {
+            "downs": self.downs,
+            "ups": self.ups,
+            "cps": round(float(cps), 3),
+            "elapsed": round(time.perf_counter() - self.started, 3),
+            "title": self.root.title(),
+        }
+        try:
+            self.report_path.parent.mkdir(parents=True, exist_ok=True)
+            temp = self.report_path.with_name(self.report_path.name + ".tmp")
+            temp.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(temp, self.report_path)
+        except Exception:
+            # The window must keep counting even if the report path is bad.
+            pass
 
     def _tick(self) -> None:
         now = time.perf_counter()
@@ -131,12 +169,27 @@ class ClickCounter:
         self.clicks_var.set(
             f"{self.downs:,} clicks  |  {max(0, self.downs - self.ups):,} unpaired"
         )
+        self._write_report(cps)
         self.root.after(REFRESH_MS, self._tick)
 
 
-def main() -> None:
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="write the live counters to this JSON file for automated checks",
+    )
+    parser.add_argument(
+        "--title",
+        default=WINDOW_TITLE,
+        help="window title (the CI harness finds the window by it)",
+    )
+    args = parser.parse_args(argv)
+
     root = tk.Tk()
-    ClickCounter(root)
+    ClickCounter(root, report_path=args.report, title=args.title)
     root.mainloop()
 
 

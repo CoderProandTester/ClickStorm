@@ -1,13 +1,13 @@
 ; ClickStorm installer (Inno Setup 6.3+).
 ;
 ; Compile:
-;   ISCC.exe /DMyAppArch=x64 /DMyAppVersion=4.6.1 installer\ClickStorm.iss
+;   ISCC.exe /DMyAppArch=x64 /DMyAppVersion=4.6.2 installer\ClickStorm.iss
 ;
 ; MyAppArch is one of: x64, x86, arm64. Build dist\ClickStorm.exe with the
 ; matching Python architecture first (PyInstaller is not a cross-compiler).
 
 #ifndef MyAppVersion
-  #define MyAppVersion "4.6.1"
+  #define MyAppVersion "4.6.2"
 #endif
 #ifndef MyAppArch
   #define MyAppArch "x64"
@@ -76,4 +76,8 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 [Run]
 ; Offered on the final page (checked by default) and run as the original user
 ; so ClickStorm does not inherit the installer's administrator token.
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+; Launch through Explorer, not directly: Setup's environment can contain the
+; previous onefile app's _PYI_* extraction variables (and a TEMP folder that
+; Setup deletes on exit), which makes the relaunched app fail to find its
+; Python DLL. The shell starts it with the user's clean environment instead.
+Filename: "{windows}\explorer.exe"; Parameters: """{app}\{#MyAppExeName}"""; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser

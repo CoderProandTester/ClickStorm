@@ -507,7 +507,6 @@ class LogSlider(tk.Canvas):
     def _redraw(self):
         self.delete("all")
         w = max(60, self.winfo_width())
-        h = max(40, self.winfo_height())
         track_y = 20
         x1 = self._pad()
         x2 = w - self._pad()

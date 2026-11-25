@@ -157,14 +157,46 @@ jobs:
           path: release/*.exe
           if-no-files-found: error
 
+  delivery:
+    name: Delivered-CPS test
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          architecture: x64
+
+      - name: Build the native engine
+        shell: pwsh
+        run: |
+          if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+          }
+          if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            throw "cargo is not available on this runner"
+          }
+          cargo build --release --manifest-path native/clickstorm-engine/Cargo.toml
+          Copy-Item "native/clickstorm-engine/target/release/clickstorm_engine.dll" "native/clickstorm_engine.dll"
+
+      - name: Check delivered SENDINPUT and SYNC
+        env:
+          PYTHONPATH: .
+        run: python tools/ci_delivery_check.py
+
   release:
     name: Publish release
-    needs: build
+    needs: [build, delivery]
     # Publish for a push to main, a v* tag push, or a manual run with
     # "publish" enabled. Always runs even when one build leg failed (that is
-    # why the verify step below insists on at least one installer).
+    # why the verify step below insists on at least one installer), but a
+    # failed delivery test blocks the release.
     if: |
-      always() && !cancelled() &&
+      always() && !cancelled() && needs.delivery.result == 'success' &&
       (github.ref == 'refs/heads/main' ||
        startsWith(github.ref, 'refs/tags/') ||
        (github.event_name == 'workflow_dispatch' && inputs.publish))

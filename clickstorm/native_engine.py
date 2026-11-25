@@ -20,15 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-from .engine import (
-    EngineConfig,
-    EngineEvent,
-    EngineStats,
-    MAX_CLICKS,
-    MAX_CPS,
-    MAX_DURATION,
-    MIN_CPS,
-)
+from .engine import EngineConfig, EngineEvent, EngineStats
 
 ABI_VERSION = 1
 CONFIG_SIZE = 80
