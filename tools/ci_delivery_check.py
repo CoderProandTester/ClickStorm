@@ -120,6 +120,16 @@ def write_summary(lines: list[str]) -> None:
         pass
 
 
+def annotate_failure(message: str) -> None:
+    """Also expose the reason as a check-run annotation."""
+    escaped = (
+        message.replace("%", "%25")
+        .replace("\r", "%0D")
+        .replace("\n", "%0A")
+    )
+    print(f"::error title=Delivery test failed::{escaped[:6000]}")
+
+
 def wait_for_window(title: str, timeout: float = 15.0) -> int:
     deadline = time.perf_counter() + timeout
     while time.perf_counter() < deadline:
@@ -186,24 +196,34 @@ def run_session(
         f"failed events {stats.failed_events:,}, "
         f"unpaired {max(0, after['downs'] - after['ups']):,}"
     )
+    detail = (
+        f"engine sent {stats.clicks_sent}, failed {stats.failed_events}, "
+        f"counter {delivered:,} delivered ({after['downs']:,} down / "
+        f"{after['ups']:,} up), elapsed {elapsed:.3f}s"
+    )
     if stats.clicks_sent != clicks:
         raise RuntimeError(
-            f"{delivery}: engine finished with {stats.clicks_sent} of {clicks} clicks"
+            f"{delivery}: engine finished with {stats.clicks_sent} of {clicks} clicks "
+            f"({detail})"
         )
     if stats.failed_events:
-        raise RuntimeError(f"{delivery}: {stats.failed_events} input events were rejected")
+        raise RuntimeError(
+            f"{delivery}: {stats.failed_events} input events were rejected ({detail})"
+        )
     if delivered < clicks * MIN_DELIVERED_RATIO:
         raise RuntimeError(
-            f"{delivery}: only {delivered} of {clicks} clicks reached the target"
+            f"{delivery}: only {delivered} of {clicks} clicks reached the target "
+            f"({detail})"
         )
     if require_rate and delivered / elapsed < MIN_DELIVERED_CPS:
         raise RuntimeError(
             f"{delivery}: delivered {delivered / elapsed:,.0f} CPS, "
-            f"below the {MIN_DELIVERED_CPS:,.0f} CPS requirement"
+            f"below the {MIN_DELIVERED_CPS:,.0f} CPS requirement ({detail})"
         )
     if after["downs"] - after["ups"] > 5:
         raise RuntimeError(
-            f"{delivery}: {after['downs'] - after['ups']} unpaired button events"
+            f"{delivery}: {after['downs'] - after['ups']} unpaired button events "
+            f"({detail})"
         )
     return delivered, elapsed
 
@@ -283,6 +303,7 @@ def main() -> int:
             pass
         summary.append("```")
         write_summary(summary)
+        annotate_failure(f"FAIL: {exc} (session {os.environ.get('SESSIONNAME', '?')}, python {sys.version.split()[0]})")
         return 1
     finally:
         if engine is not None:
