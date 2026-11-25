@@ -134,7 +134,7 @@ the spec is what keeps Windows from opening a console window.
 The Inno Setup script takes the app version and target architecture as defines:
 
 ```bat
-iscc /DMyAppArch=x64 /DMyAppVersion=4.1.0 installer\ClickStorm.iss
+iscc /DMyAppArch=x64 /DMyAppVersion=4.1.1 installer\ClickStorm.iss
 ```
 
 `MyAppArch` is `x64`, `x86` (32-bit) or `arm64`. Output:

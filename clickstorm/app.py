@@ -432,7 +432,7 @@ class ClickStormApp:
         ).pack(anchor="e")
         tk.Label(
             interval_block,
-            text="BATCH INTERVAL",
+            text="CLICK INTERVAL",
             bg=COLORS["card"],
             fg=COLORS["faint"],
             font=theme.font(7, "bold"),
@@ -704,8 +704,8 @@ class ClickStormApp:
         badge_row = tk.Frame(inner, bg=COLORS["card"])
         badge_row.pack(fill="x")
         for text, color in (
-            ("BATCHED INPUT", COLORS["accent"]),
-            ("1 MS TIMER", COLORS["green"]),
+            ("SMALL BATCHES", COLORS["accent"]),
+            ("HIGH-RES TIMER", COLORS["green"]),
             ("EXACT TARGET", COLORS["purple"]),
         ):
             badge = tk.Frame(
@@ -854,7 +854,7 @@ class ClickStormApp:
             ("remaining", "REMAINING", COLORS["amber"]),
             ("average", "AVERAGE", COLORS["text"]),
             ("peak", "PEAK", COLORS["purple"]),
-            ("calls", "BATCHES", COLORS["text_dim"]),
+            ("calls", "SEND CALLS", COLORS["text_dim"]),
             ("inputs", "INPUT EVENTS", COLORS["text_dim"]),
             ("dropped", "FAILED EVENTS", COLORS["red"]),
         )

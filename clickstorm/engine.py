@@ -620,7 +620,14 @@ class ClickEngine:
                                 or "Windows rejected every injected click."
                             )
                             break
-                        time.sleep(0.001)
+                        # Nothing got through. Yield to the queue first and
+                        # only pause once a few calls in a row were refused:
+                        # a flat 1 ms sleep threw away most of the next slot
+                        # at high rates, while a 0.25 ms high-resolution wait
+                        # still keeps a refusal storm from pinning a core.
+                        winapi.switch_to_thread()
+                        if failures > 4:
+                            timer.sleep(0.00025)
 
         except Exception as exc:  # defensive: never silently kill the thread
             reason = "error"

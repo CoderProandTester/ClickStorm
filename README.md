@@ -40,13 +40,14 @@ with Start-menu shortcuts and an entry in Settings → Apps.
   unlimited running.
 - All five mouse buttons: left, right, middle, X1 and X2.
 - Global hotkeys: **F5 starts**, **F9 stops** (remappable in Settings).
-- Follow-cursor clicking or a fixed coordinate returned to on every burst.
+- Follow-cursor clicking or a fixed coordinate the cursor is returned to
+  while clicking.
 - Optional timing jitter, 0-5 s start delay, always-on-top and
   minimize-on-start.
-- Per-millisecond pacing: the target is divided by 1,000, so 25,000 CPS means
-  25 clicks are released in every 1 ms slot (1,000 slots per second) and
-  500 CPS is one click every 2 ms. Credit is tracked against the real clock,
-  so fractional rates such as 1,234 CPS stay exact.
+- Clock-based pacing: credit accrues against `perf_counter()`, so 25,000 CPS
+  owes 25 clicks per millisecond of real time and 500 CPS owes one click every
+  2 ms. Fractional rates such as 1,234 CPS stay exact, and a late wake-up is
+  repaid instead of losing clicks.
 - Small adaptive `SendInput` calls: one click per call at first, widening only
   while calls stay far cheaper than a slot, because wide arrays are measurably
   slower once an app throttles input.
@@ -228,6 +229,19 @@ Version 4.0.0 replaced the wide catch-up bursts of earlier builds (16 clicks
 per call, growing to 64) with small adaptive calls: on the same machine, a
 5,000 CPS target delivered about **166 CPS** before that change and about
 **4,980 CPS** after it.
+
+### Why more threads do not help
+
+A single click thread is not a limitation that extra threads can lift.
+Microsoft documents `SendInput` as inserting "the events in the `INPUT`
+structures **serially** into the keyboard or mouse input stream", and it
+returns zero when "the input was already blocked by another thread". Every
+sender therefore queues behind the same system input path and the same
+target message loop, so N threads contend rather than add throughput, and
+they can also interleave DOWN/UP pairs, leaving a button latched. What does
+work is not pushing the input through that path at all: posted window
+messages skip it, which is why the Direct and AUTO delivery modes reach the
+full rate where a window accepts them.
 
 Above the ceiling, `25,000` behaves as a "run as fast as this app allows"
 setting: the live CPS readout shows what actually reached the target. Games

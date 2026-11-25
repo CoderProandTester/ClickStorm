@@ -1,6 +1,6 @@
 """ClickStorm - a high-performance, dependency-free Windows auto clicker."""
 
-__version__ = "4.1.0"
+__version__ = "4.1.1"
 APP_VERSION = __version__
 
 APP_NAME = "ClickStorm"

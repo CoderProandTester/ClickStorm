@@ -505,6 +505,10 @@ def post_clicks(target: DirectTarget, count: int) -> int:
         if not post(hwnd, down_msg, down_wparam, lparam):
             break
         if not post(hwnd, up_msg, up_wparam, lparam):
+            # The down message went through but the up did not. Retry the
+            # release once so the target is never left with the button
+            # latched down, which would swallow the next real drag or click.
+            post(hwnd, up_msg, up_wparam, lparam)
             break
         accepted += 1
     return accepted

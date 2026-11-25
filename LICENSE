@@ -19,3 +19,67 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+================================================================================
+THIRD-PARTY CREDITS AND LICENCE COMPATIBILITY
+================================================================================
+
+ClickStorm contains no third-party source code. Every file in this repository
+is original work by the copyright holder above, so the MIT licence above is
+the only licence that applies to the distributed program.
+
+The projects below were read while designing the click engine. Their
+measurements, behaviour and design ideas informed decisions; where a licence
+would not have allowed reuse, nothing was copied at all. This section records
+that credit and the licence check so the project's licensing stays auditable.
+
+Verified 2026-11-25 against each project's repository:
+
+  Project                Licence        Compatible with MIT?  What was used
+  ---------------------  -------------  --------------------  --------------
+  chris101-dev/          MIT            Yes                   Drift-free pacing
+  ColibriTap                                                against an absolute
+                                                            deadline on a
+                                                            monotonic clock.
+
+  PriyanshuGeTRekT/      MIT            Yes                   Posting button
+  WinClicker                                                messages straight to
+                                                            a window for
+                                                            background clicks
+                                                            (the "Direct"
+                                                            delivery mode).
+
+  local764larp/          None declared  No - all rights       Published
+  auto-clicker           ("not yet      reserved              delivered-vs-
+                          chosen")                            emitted CPS
+                                                            measurements and
+                                                            the timer / yield /
+                                                            spin wait tiers.
+                                                            No code used.
+
+  Blur009/               GPL-3.0        No - copyleft,        Feature ideas only
+  Blur-AutoClicker                      incompatible with     (click and time
+                                        an MIT release)       limits, position
+                                                              clicking). No code
+                                                              used, because
+                                                              GPL-3.0 code cannot
+                                                              be relicensed under
+                                                              MIT.
+
+Summary of the compatibility check:
+
+  * MIT-licensed projects (ColibriTap, WinClicker): compatible in both
+    directions. Their notices are honoured by the credit above.
+  * Projects with no licence (local764larp/auto-clicker): not reusable. Only
+    published numbers and ideas were taken, which does not copy the work.
+  * GPL-3.0 projects (Blur Auto Clicker): not compatible with an MIT
+    distribution. No code was taken; only non-copyrightable ideas such as
+    "offer a click limit" were used.
+
+Deliberately not used: kernel-mode input drivers such as Interception
+(https://github.com/oblitum/Interception). They would add an
+administrator-installed signed driver dependency and change this project's
+licensing and distribution story, so ClickStorm stays user-mode only.
+
+If you believe something here is credited incorrectly, open an issue and it
+will be corrected or removed.
