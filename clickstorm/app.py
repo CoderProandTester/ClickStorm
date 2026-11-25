@@ -14,7 +14,14 @@ from tkinter import messagebox
 
 from . import APP_NAME, APP_TAGLINE
 from . import theme, winapi
-from .engine import ClickEngine, EngineConfig, MAX_CLICKS, MAX_CPS, MIN_CPS
+from .engine import (
+    ClickEngine,
+    EngineConfig,
+    MAX_CLICKS,
+    MAX_CPS,
+    MIN_CPS,
+    SENDINPUT_CEILING_CPS,
+)
 from .settings import Settings, settings_path
 from .settings_dialog import SettingsDialog
 from .update_dialog import UpdateDialog
@@ -1033,11 +1040,14 @@ class ClickStormApp:
         self.stop_button.set_text(f"STOP  \u00b7  {stop}")
 
     def _refresh_engine_strip(self) -> None:
-        delivery = (
-            "SendInput batching"
-            if self.settings.delivery == "sendinput"
-            else "Direct window messages (experimental)"
-        )
+        delivery = {
+            "sendinput": "SendInput, small adaptive batches",
+            "direct": "Direct window messages (experimental)",
+            "auto": (
+                "AUTO - Direct above "
+                f"{fmt_rate(SENDINPUT_CEILING_CPS)} CPS"
+            ),
+        }.get(self.settings.delivery, "SendInput, small adaptive batches")
         position = (
             "Follow cursor"
             if self.settings.position_mode == "cursor"
@@ -1050,7 +1060,7 @@ class ClickStormApp:
         )
         self.engine_info_var.set(
             f"{delivery}  \u00b7  {position}{jitter}\n"
-            f"1 ms timer resolution  \u00b7  high-priority click thread"
+            f"Three-tier wait  \u00b7  high-priority click thread"
         )
 
     def _update_footer_idle(self) -> None:
@@ -1059,11 +1069,10 @@ class ClickStormApp:
             delay_text = f"{delay:.1f}s start delay"
         else:
             delay_text = "instant start"
-        mode = (
-            "Direct"
-            if self.settings.delivery == "direct"
-            else "SendInput"
-        )
+        mode = {
+            "direct": "Direct",
+            "auto": "AUTO delivery",
+        }.get(self.settings.delivery, "SendInput")
         self.footer_title_var.set("Ready to click")
         self.footer_sub_var.set(
             f"{delay_text}  \u00b7  {mode}  \u00b7  "
@@ -1112,11 +1121,17 @@ class ClickStormApp:
             slot_text = f"{batch} clicks every 1 ms slot"
         else:
             slot_text = f"1 click every {1000.0 / rate:,.2f} ms"
-        if rate > 4_000:
-            text = (
-                f"{slot_text}, released as fast as Windows accepts them."
-            )
-            color = COLORS["red"]
+        if rate > SENDINPUT_CEILING_CPS:
+            if self.settings.delivery == "sendinput":
+                text = (
+                    f"{slot_text}. SendInput tops out near "
+                    f"{fmt_rate(SENDINPUT_CEILING_CPS)} CPS here - set "
+                    "Delivery to AUTO for the full rate."
+                )
+                color = COLORS["red"]
+            else:
+                text = f"{slot_text}, delivered over the direct path."
+                color = COLORS["green"]
         elif rate > 2_000:
             text = f"{slot_text}. Very fast; apps that throttle input register fewer."
             color = COLORS["amber"]

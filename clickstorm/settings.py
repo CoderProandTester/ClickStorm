@@ -112,7 +112,9 @@ class Settings:
 
         out.start_delay = number("start_delay", 0.0, 10.0)
         out.jitter_percent = number("jitter_percent", 0.0, 0.75)
-        out.delivery = choice("delivery", ("sendinput", "direct"), "sendinput")
+        out.delivery = choice(
+            "delivery", ("sendinput", "direct", "auto"), "sendinput"
+        )
         out.position_mode = choice(
             "position_mode", ("cursor", "fixed"), "cursor"
         )

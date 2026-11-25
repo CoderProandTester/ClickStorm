@@ -64,6 +64,9 @@ properties when changing it:
 - **Small `SendInput` arrays.** Large arrays make `SendInput` block while the
   target drains its input queue, which shows up as a low click rate and a
   sluggish STOP. Keep bursts small and adaptive.
+- **`auto` delivery must never click into nothing.** It picks direct posting
+  only above `SENDINPUT_CEILING_CPS` and only when a target window resolves;
+  otherwise it falls back to SendInput for that session.
 - **Exact click targets.** Click credit is only spent on clicks Windows
   accepted. Rejected clicks must stay due and be retried rather than silently
   dropped.
@@ -131,7 +134,7 @@ the spec is what keeps Windows from opening a console window.
 The Inno Setup script takes the app version and target architecture as defines:
 
 ```bat
-iscc /DMyAppArch=x64 /DMyAppVersion=4.0.2 installer\ClickStorm.iss
+iscc /DMyAppArch=x64 /DMyAppVersion=4.1.0 installer\ClickStorm.iss
 ```
 
 `MyAppArch` is `x64`, `x86` (32-bit) or `arm64`. Output:

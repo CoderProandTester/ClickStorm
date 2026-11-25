@@ -54,6 +54,14 @@ MAX_CPS = 25_000.0
 MAX_CLICKS = 25_000
 MAX_DURATION = 86_400.0
 
+# Real injected input cannot go faster than this: SendInput hands every event
+# to one system input thread and then to the target's message loop, and
+# measured ceilings on fast desktops land around 6,000-7,000 delivered CPS no
+# matter how fast the sender is. Posted window messages skip that thread, so
+# they do reach the requested rate. "auto" delivery therefore uses SendInput
+# up to this rate and posted messages above it.
+SENDINPUT_CEILING_CPS = 6_000.0
+
 # The scheduling grid. One slot is one millisecond, so a CPS value divided by
 # 1000 is exactly the number of clicks that belongs to one slot.
 TICK_SECONDS = 0.001
@@ -92,7 +100,7 @@ class EngineConfig:
     limit_mode: str = "unlimited"  # unlimited | clicks | duration
     click_limit: int = 5_000
     duration: float = 10.0
-    delivery: str = "sendinput"  # sendinput | direct
+    delivery: str = "sendinput"  # sendinput | direct | auto
     jitter_percent: float = 0.0
     position_mode: str = "cursor"  # cursor | fixed
     fixed_x: int = 0
@@ -106,7 +114,9 @@ class EngineConfig:
         jitter = max(0.0, min(0.75, float(self.jitter_percent)))
         button = self.button if self.button in winapi.BUTTONS else "Left"
         delivery = (
-            self.delivery if self.delivery in ("sendinput", "direct") else "sendinput"
+            self.delivery
+            if self.delivery in ("sendinput", "direct", "auto")
+            else "sendinput"
         )
         position = (
             self.position_mode if self.position_mode in ("cursor", "fixed") else "cursor"
@@ -379,9 +389,19 @@ class ClickEngine:
         else:
             fixed_x = fixed_y = 0
 
+        delivery = config.delivery
+        if delivery == "auto":
+            # Choose the path that can actually reach the requested rate:
+            # SendInput is capped by Windows, posted messages are not.
+            delivery = (
+                "direct"
+                if config.cps > SENDINPUT_CEILING_CPS
+                else "sendinput"
+            )
+
         direct_target = None
         direct_point = None
-        if config.delivery == "direct":
+        if delivery == "direct":
             point = self._point(config, fixed_x, fixed_y)
             if point is not None:
                 direct_target = winapi.make_direct_target(
@@ -390,12 +410,16 @@ class ClickEngine:
                 if direct_target is not None:
                     winapi.focus_target(direct_target)
                 direct_point = point
+            if config.delivery == "auto" and direct_target is None:
+                # Nothing to post to under the cursor. An auto run must still
+                # click, so fall back to the universally compatible path.
+                delivery = "sendinput"
 
         # Built once per session. Every SendInput call reuses this array and
         # simply passes a smaller event count, so the loop never allocates.
         click_array = (
             winapi.build_click_inputs(config.button, MAX_CHUNK_CLICKS)
-            if config.delivery == "sendinput"
+            if delivery == "sendinput"
             else None
         )
 

@@ -149,10 +149,14 @@ class SettingsDialog(tk.Toplevel):
         inner = self._section(parent, "Delivery")
         self.delivery_segment = theme.SegmentedControl(
             inner,
-            options=(("sendinput", "SENDINPUT (FASTEST)"), ("direct", "DIRECT MESSAGE")),
+            options=(
+                ("sendinput", "SENDINPUT"),
+                ("direct", "DIRECT"),
+                ("auto", "AUTO"),
+            ),
             variable=self.delivery_var,
             bg=COLORS["card"],
-            button_width=154,
+            button_width=104,
             button_height=32,
             font_size=8,
             accent=COLORS["accent"],
@@ -160,8 +164,11 @@ class SettingsDialog(tk.Toplevel):
         self.delivery_segment.pack(anchor="w", pady=(9, 5))
         theme.make_label(
             inner,
-            "SendInput is the fastest compatible option. Direct message is "
-            "experimental and only works with classic Win32 windows.",
+            "SendInput works with everything, but Windows caps real injected "
+            "input near 6,000 CPS. Direct posts button messages straight to "
+            "the window, which reaches the full 25,000 CPS but only works "
+            "with classic Win32 windows. AUTO uses Direct above 6,000 CPS and "
+            "SendInput below it.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
             justify="left", wraplength=340,
         ).pack(anchor="w")

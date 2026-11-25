@@ -50,10 +50,12 @@ with Start-menu shortcuts and an entry in Settings → Apps.
 - Small adaptive `SendInput` calls: one click per call at first, widening only
   while calls stay far cheaper than a slot, because wide arrays are measurably
   slower once an app throttles input.
-- Two delivery modes: **SendInput**, which every app and game accepts and which
-  Windows caps at roughly 6,000-7,000 CPS here, and **direct window messages**,
-  which skip the system input queue and measured ~25,000 CPS for apps that act
-  on posted clicks.
+- Three delivery modes: **SendInput**, which every app and game accepts and
+  which Windows caps at roughly 6,000-7,000 CPS here; **direct window
+  messages**, which skip the system input queue and measured ~25,000 CPS for
+  apps that act on posted clicks; and **AUTO**, which uses SendInput up to
+  6,000 CPS and direct posting above it, so a 25,000 CPS setting really does
+  deliver 25,000 CPS wherever the target accepts posted clicks.
 - Live stats: actual CPS, peak CPS, rate history, progress, ETA, batches,
   input events and failed events.
 - **UPDATES** button: checks the latest GitHub release, lists the installers it
@@ -211,6 +213,8 @@ ClickStorm 4.0.1 clicking into a window that counted every click it received:
 | 20,000 CPS | 5,820 CPS | 19,962 CPS |
 | 25,000 CPS | 6,052 CPS | 24,945 CPS |
 
+The sending side is not the limit: measured against a null sink that accepts
+every event instantly, this engine emits **~24,900 CPS** at a 25,000 target.
 `SendInput` - what games and normal apps expect - tops out at roughly
 **6,000-7,000 CPS** on this machine. Above that Windows still accepts the
 events, but the target's message loop cannot consume them, which is why a
@@ -300,9 +304,12 @@ installer/ClickStorm.iss Inno Setup installer recipe
   a moment to drain.
 - **25,000 CPS reads around 6,000 CPS actual.** That is the `SendInput`
   ceiling: Windows delivers roughly 6,000-7,000 injected clicks per second
-  here no matter how high the target is. Switch **Settings → Delivery** to
-  **Direct window messages** when the target accepts posted clicks; that path
-  measured ~25,000 CPS.
+  here no matter how high the target is, and no user-mode clicker can change
+  that. Set **Settings → Delivery** to **AUTO** (or **Direct window
+  messages**): direct posting measured ~25,000 CPS, and AUTO picks it
+  automatically above 6,000 CPS while staying on SendInput for slower rates.
+  If the window under the cursor does not accept posted clicks, AUTO falls
+  back to SendInput rather than clicking into nothing.
 - **The update reported a missing module.** 4.0.1 starts the downloaded
   installer without inheriting the windowed app's absent std handles (that
   call was the failure), and every update failure is now written to
