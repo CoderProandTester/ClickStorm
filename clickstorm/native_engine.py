@@ -91,6 +91,9 @@ def _library_candidates():
         roots.append(Path(meipass))
     roots.append(Path(__file__).resolve().parent)
     roots.append(Path(__file__).resolve().parent.parent)
+    # The documented build copies the DLL into the repository's native/
+    # folder; source runs need to find it there, not only at the repo root.
+    roots.append(Path(__file__).resolve().parent.parent / "native")
     if getattr(sys, "frozen", False):
         roots.append(Path(sys.executable).resolve().parent)
     for root in roots:

@@ -96,10 +96,11 @@ python clickstorm.py
 ```
 
 Use `pythonw clickstorm.py` if you want to launch without a terminal. The
-source build has no Python dependencies. If `clickstorm_engine.dll` is not
-next to the package the unified engine simply uses its Python core and the
-ENGINE strip says so; build the DLL with the command in the next section to
-get the native core.
+source build has no Python dependencies. The engine looks for
+`clickstorm_engine.dll` in the package folder, the project root and `native\`
+(the build below puts it there); if it is missing the unified engine uses its
+Python core and the ENGINE strip says so. Build the DLL with the command in
+the next section to get the native core.
 
 ## Gauntlet: the console harness
 
@@ -147,6 +148,8 @@ Build the native core first (64-bit builds only; requires Rust):
 cargo build --release --manifest-path native\clickstorm-engine\Cargo.toml
 copy native\clickstorm-engine\target\release\clickstorm_engine.dll native\
 ```
+
+The source app loads the DLL from `native\`; the packaged app bundles it.
 
 Then package the app:
 
