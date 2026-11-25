@@ -184,11 +184,14 @@ limit expires, or when you press stop. In unlimited mode only stop ends a run.
 - **Paced credit, not dropped work.** Click credit is only spent on clicks
   Windows confirmed. A rejected shortfall goes back into the bank and is
   retried on the next slot, so a run ends on the exact target.
-- **Precision timing.** A high-resolution waitable timer
-  (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`) covers most of each 1 ms slot and
-  the loop spins only the last few hundred microseconds, with
-  `timeBeginPeriod(1)` and time-critical thread priority while a session is
-  active. This holds the 1 ms grid without pinning an entire core.
+- **Three-tier wait.** A high-resolution waitable timer
+  (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`) sleeps through anything above
+  2 ms, `SwitchToThread` yields the timeslice between 2 ms and 50 us, and the
+  loop only spins the last 50 us — so the timeline holds without pinning a
+  core. `timeBeginPeriod(1)` (the default 15.6 ms Windows tick would cap
+  throughput near 64 CPS), time-critical thread priority, a higher process
+  class and an opt-out from Windows 11 ecoQoS power throttling
+  (`SetThreadInformation`) are all held for the session.
 - **No cursor movement per click.** The mouse is not re-positioned for every
   click; SendInput clicks at the current position (fixed mode returns the
   cursor to its point once per slot).
@@ -226,6 +229,27 @@ Above the ceiling, `25,000` behaves as a "run as fast as this app allows"
 setting: the live CPS readout shows what actually reached the target. Games
 and apps that throttle input usually register **500-2,000 CPS** more reliably
 than an extreme setting.
+
+## Prior art and credits
+
+ClickStorm's pacing and delivery choices were made after reading how other
+Windows clickers are built and what they measured. Credit to those projects:
+
+| Project | Licence | What was taken from it |
+| --- | --- | --- |
+| [local764larp/auto-clicker](https://github.com/local764larp/auto-clicker) | none declared | The delivered-versus-emitted CPS benchmark that shows wide `SendInput` batches lose delivered clicks, and the timer / yield / spin wait tiers. Measurements and design ideas only. |
+| [chris101-dev/ColibriTap](https://github.com/chris101-dev/ColibriTap) | MIT | Drift-free pacing against an absolute deadline on a monotonic clock instead of `sleep(interval)`. |
+| [PriyanshuGeTRekT/WinClicker](https://github.com/PriyanshuGeTRekT/WinClicker) | MIT | Clicking a window in the background with posted button messages (the **Direct message** delivery mode). |
+| [Blur009/Blur-AutoClicker](https://github.com/Blur009/Blur-AutoClicker) | GPL-3.0 | Feature ideas only (click/time limits, position clicking). No code is reused, because GPL-3.0 is not compatible with this project's MIT licence. |
+
+No source code was copied from any of these projects. Where a licence would
+not have allowed reuse, only published measurements, behaviour and design
+ideas were used. ClickStorm remains MIT (see [LICENSE](LICENSE)).
+
+Deliberately **not** used: kernel-mode input drivers such as
+[Interception](https://github.com/oblitum/Interception). They can lift the
+ceiling for some targets, but they need an administrator-installed, signed
+driver and would end the "single portable exe, no dependencies" promise.
 
 ## Settings and files
 

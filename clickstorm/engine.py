@@ -76,6 +76,10 @@ DIRECT_CHUNK_CLICKS = 256
 # A call slower than this is a sign the target is throttling input; widen the
 # batch only while a call stays comfortably inside one millisecond slot.
 CHUNK_SLOW_SECONDS = 0.0008
+# Wait tiers, in seconds: above YIELD a timer sleeps, between SPIN and YIELD
+# the thread yields its timeslice back to the CPU, below SPIN it spins.
+YIELD_SECONDS = 0.002
+SPIN_SECONDS = 0.00005
 # Keep retrying through a temporarily swamped input queue (about 0.4 s)
 # before abandoning a run, so a brief stall cannot cut a target short.
 MAX_CONSECUTIVE_FAILURES = 200
@@ -355,6 +359,10 @@ class ClickEngine:
             # a busy machine.
             winapi.set_thread_priority(True)
             winapi.set_process_priority(True)
+            # Windows 11 can move a busy thread onto an ecoQoS low-power core
+            # and clamp its clock; the click thread asks for full speed for
+            # the length of the session. Harmless where the API is missing.
+            winapi.disable_power_throttling()
 
         target_clicks = (
             config.click_limit if config.limit_mode == "clicks" else None
@@ -630,10 +638,12 @@ class ClickEngine:
     def _wait_until(self, deadline: float, timer) -> bool:
         """Wait for ``deadline``. Returns False when a stop is requested.
 
-        A high-resolution waitable timer covers most of the gap and the loop
-        spins only the last few hundred microseconds, which is the cheapest
-        way to hold a 1 ms grid without burning an entire core. Oversleeping
-        is harmless: the catch-up slot count repays it on the next turn.
+        Three tiers, so the wait is cheap but still lands on the deadline: a
+        high-resolution waitable timer above 2 ms, ``SwitchToThread`` between
+        2 ms and 50 us, and a spin only for the last 50 us. Spinning on the
+        last few hundred microseconds instead cost about half a core at
+        1,000 CPS for no accuracy gain. Oversleeping is harmless: the credit
+        maths repays it on the next turn.
         """
         while True:
             if self._shutdown or self._stop_requested:
@@ -641,10 +651,12 @@ class ClickEngine:
             remaining = deadline - time.perf_counter()
             if remaining <= 0.0:
                 return True
-            if remaining > 0.0005:
+            if remaining > YIELD_SECONDS:
                 # Cap one sleep so a long wait (low rates) still reacts to the
                 # stop hotkey within a few milliseconds.
-                timer.sleep(min(remaining - 0.0004, 0.01))
+                timer.sleep(min(remaining - YIELD_SECONDS + 0.0002, 0.01))
+            elif remaining > SPIN_SECONDS:
+                winapi.switch_to_thread()
             else:
                 while time.perf_counter() < deadline:
                     if self._shutdown or self._stop_requested:
