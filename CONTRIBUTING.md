@@ -71,7 +71,12 @@ properties when changing it:
   accepted. Rejected clicks must stay due and be retried rather than silently
   dropped.
 - **Responsive stop.** Stop, duration and target are checked between sends, so
-  a turn must stay short even at high rates.
+  a turn must stay short even at high rates. Global hotkeys are polled on their
+  own daemon thread and write to the engine directly; the UI only drains a
+  queue, so a stop never waits for Tk.
+- **Never target ClickStorm itself.** `make_direct_target` refuses windows that
+  belong to this process, so a run started from the START button cannot post
+  clicks into the app's own controls.
 - **No giant catch-up bursts.** If the target is slow, the run should slow
   down; do not fire a backlog at it.
 
@@ -134,7 +139,7 @@ the spec is what keeps Windows from opening a console window.
 The Inno Setup script takes the app version and target architecture as defines:
 
 ```bat
-iscc /DMyAppArch=x64 /DMyAppVersion=4.1.1 installer\ClickStorm.iss
+iscc /DMyAppArch=x64 /DMyAppVersion=4.2.0 installer\ClickStorm.iss
 ```
 
 `MyAppArch` is `x64`, `x86` (32-bit) or `arm64`. Output:

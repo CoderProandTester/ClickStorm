@@ -10,6 +10,16 @@ as a float, so fractional rates such as 1,234 CPS (1.234 clicks/ms) keep their
 fraction instead of drifting, and a late wake-up is repaid automatically
 instead of losing clicks.
 
+Pinned window
+-------------
+With ``pin_window`` the direct path resolves the window under the cursor once
+when the run starts and then keeps the handle.  The cursor can move and the
+target can sit behind another window: the clicks still land on that client
+area, and the hot loop skips both ``GetCursorPos`` and the window hit test.
+A run started from ClickStorm's own button finds ClickStorm under the cursor,
+which is why ``make_direct_target`` refuses windows that belong to this
+process.
+
 Delivery
 --------
 Measured on Windows, one ``SendInput`` call carrying a single click (2 events)
@@ -101,6 +111,7 @@ class EngineConfig:
     click_limit: int = 5_000
     duration: float = 10.0
     delivery: str = "sendinput"  # sendinput | direct | auto
+    pin_window: bool = False
     jitter_percent: float = 0.0
     position_mode: str = "cursor"  # cursor | fixed
     fixed_x: int = 0
@@ -133,6 +144,7 @@ class EngineConfig:
             click_limit=click_limit,
             duration=duration,
             delivery=delivery,
+            pin_window=bool(self.pin_window),
             jitter_percent=jitter,
             position_mode=position,
             fixed_x=int(self.fixed_x),
@@ -401,13 +413,21 @@ class ClickEngine:
 
         direct_target = None
         direct_point = None
+        pinned = False
         if delivery == "direct":
             point = self._point(config, fixed_x, fixed_y)
             if point is not None:
+                # Requested pinning is remembered even when nothing was found
+                # underneath, so the run reports the pinned hint instead of a
+                # generic "no window" message.
+                pinned = bool(config.pin_window)
                 direct_target = winapi.make_direct_target(
                     point[0], point[1], config.button
                 )
                 if direct_target is not None:
+                    # The window handle is kept for the whole run. Posting to
+                    # it needs neither the cursor nor the foreground, so the
+                    # target can even be covered by another window.
                     winapi.focus_target(direct_target)
                 direct_point = point
             if config.delivery == "auto" and direct_target is None:
@@ -525,7 +545,7 @@ class ClickEngine:
                         break
                 self._clicks_requested += due
 
-                if config.position_mode == "fixed":
+                if config.position_mode == "fixed" and not pinned:
                     winapi.keep_cursor_locked(fixed_x, fixed_y)
 
                 call_start = time.perf_counter()
@@ -548,11 +568,23 @@ class ClickEngine:
                             "ClickStorm as administrator."
                         )
                 else:
-                    point = self._point(config, fixed_x, fixed_y)
-                    if point is None:
+                    if pinned:
+                        # Resolved once at start: skipping the per-batch
+                        # cursor lookup and window hit test is also the
+                        # fastest path, because neither changes the answer.
+                        point = direct_point
+                    else:
+                        point = self._point(config, fixed_x, fixed_y)
+                    if pinned and direct_target is None:
+                        detail = (
+                            "Pinned window mode found no clickable window "
+                            "under the cursor. Move the cursor over the "
+                            "target window and start again."
+                        )
+                    elif point is None:
                         detail = "Could not read the cursor position."
                     else:
-                        if point != direct_point:
+                        if not pinned and point != direct_point:
                             direct_target = winapi.make_direct_target(
                                 point[0], point[1], config.button
                             )

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ctypes
 import os
+import queue
 import re
 import sys
+import threading
 import time
 import tkinter as tk
 import traceback
@@ -142,7 +144,10 @@ class ClickStormApp:
         self._duration = float(settings.duration)
         self._start_delay = float(settings.start_delay)
 
-        self._hotkey_keys_down: set[int] = set()
+        # The watcher thread polls the global keys and drops actions here; the
+        # UI thread drains it, so the watcher never touches Tk at all.
+        self._hotkey_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self._hotkey_thread: threading.Thread | None = None
 
         self._sample_time = time.perf_counter()
         self._sample_clicks = 0
@@ -177,6 +182,7 @@ class ClickStormApp:
         self._hotkey_job = self.root.after(
             self.HOTKEY_INTERVAL_MS, self._hotkey_tick
         )
+        self._start_hotkey_watcher()
 
     # ------------------------------------------------------------------
     # GUI construction
@@ -1058,8 +1064,13 @@ class ClickStormApp:
             if self.settings.jitter_percent > 0
             else ""
         )
+        pinned = (
+            "  \u00b7  window pinned"
+            if self.settings.pin_window and self.settings.delivery != "sendinput"
+            else ""
+        )
         self.engine_info_var.set(
-            f"{delivery}  \u00b7  {position}{jitter}\n"
+            f"{delivery}  \u00b7  {position}{pinned}{jitter}\n"
             f"Three-tier wait  \u00b7  high-priority click thread"
         )
 
@@ -1077,7 +1088,7 @@ class ClickStormApp:
         self.footer_sub_var.set(
             f"{delay_text}  \u00b7  {mode}  \u00b7  "
             f"{self.settings.hotkey_start} starts, "
-            f"{self.settings.hotkey_stop} stops"
+            f"{self.settings.hotkey_stop} stops, ESC halts"
         )
 
     def _set_rate(self, value: float, update_entry: bool = False) -> None:
@@ -1492,6 +1503,7 @@ class ClickStormApp:
             click_limit=self._click_limit,
             duration=self._duration,
             delivery=self.settings.delivery,
+            pin_window=self.settings.pin_window,
             jitter_percent=self.settings.jitter_percent,
             position_mode=self.settings.position_mode,
             fixed_x=self.settings.fixed_x,
@@ -1864,7 +1876,7 @@ class ClickStormApp:
         if self.shutdown:
             return
         try:
-            self._poll_hotkeys()
+            self._drain_hotkey_events()
         except Exception as exc:
             _log_exception("Hotkey tick", exc)
         finally:
@@ -1873,35 +1885,75 @@ class ClickStormApp:
                     self.HOTKEY_INTERVAL_MS, self._hotkey_tick
                 )
 
-    def _poll_hotkeys(self) -> None:
-        if not self.settings.hotkeys_enabled or self.shutdown:
-            return
-        start_vk = winapi.HOTKEY_KEYS.get(self.settings.hotkey_start)
-        stop_vk = winapi.HOTKEY_KEYS.get(self.settings.hotkey_stop)
-        start_pressed = False
-        stop_pressed = False
-
-        for vk, kind in ((start_vk, "start"), (stop_vk, "stop")):
-            if vk is None:
-                continue
-            down, tapped = winapi.key_pressed(vk)
-            # ``tapped`` catches a press+release that happened between polls;
-            # the set catches a key that is still held from before.
-            if tapped or (down and vk not in self._hotkey_keys_down):
-                if kind == "start":
-                    start_pressed = True
-                else:
-                    stop_pressed = True
-            if down:
-                self._hotkey_keys_down.add(vk)
+    def _drain_hotkey_events(self) -> None:
+        while True:
+            try:
+                action = self._hotkey_queue.get_nowait()
+            except queue.Empty:
+                return
+            if action == "start":
+                if not self._settings_open:
+                    self.start_clicking()
             else:
-                self._hotkey_keys_down.discard(vk)
+                self.stop_clicking()
 
-        if stop_pressed and (self._run_active or self._countdown_active):
-            self.stop_clicking()
-        if start_pressed:
-            if not self._settings_open:
-                self.start_clicking()
+    # The stop key and the ESC panic key have to work even when Tk is busy
+    # redrawing a 25,000 CPS dashboard or a modal dialog owns the event loop,
+    # so they are polled on their own daemon thread. The watcher never touches
+    # Tk: a stop is written straight to the thread-safe engine, and the UI
+    # catches up from the queue on its next tick.
+    PANIC_KEY = 0x1B  # VK_ESCAPE
+    HOTKEY_POLL_SECONDS = 0.006
+
+    def _start_hotkey_watcher(self) -> None:
+        self._hotkey_thread = threading.Thread(
+            target=self._hotkey_watcher,
+            name="ClickStormHotkeys",
+            daemon=True,
+        )
+        self._hotkey_thread.start()
+
+    def _hotkey_watcher(self) -> None:
+        held: set[int] = set()
+        while not self.shutdown:
+            if self.settings.hotkeys_enabled:
+                keys = (
+                    (winapi.HOTKEY_KEYS.get(self.settings.hotkey_start), "start"),
+                    (winapi.HOTKEY_KEYS.get(self.settings.hotkey_stop), "stop"),
+                    (self.PANIC_KEY, "panic"),
+                )
+            else:
+                # The panic key stays live even with hotkeys switched off.
+                keys = ((self.PANIC_KEY, "panic"),)
+
+            for vk, action in keys:
+                if vk is None:
+                    continue
+                down, tapped = winapi.key_pressed(vk)
+                # ``tapped`` catches a press+release between two polls; the
+                # set catches a key that is still held from before.
+                pressed = tapped or (down and vk not in held)
+                if down:
+                    held.add(vk)
+                else:
+                    held.discard(vk)
+                if not pressed:
+                    continue
+
+                if action == "start":
+                    self._hotkey_queue.put("start")
+                    continue
+
+                # Halt the engine from this thread: it is thread-safe and the
+                # halt is the one action that must not wait for Tk.
+                if self.engine.is_running():
+                    self.engine.stop()
+                self._hotkey_queue.put("stop")
+
+            # Forget keys that are no longer watched, so re-enabling hotkeys
+            # still treats a held key as a fresh press.
+            held.intersection_update(vk for vk, _ in keys if vk is not None)
+            time.sleep(self.HOTKEY_POLL_SECONDS)
 
     # ------------------------------------------------------------------
     # Settings

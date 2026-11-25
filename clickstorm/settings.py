@@ -41,6 +41,7 @@ class Settings:
     start_delay: float = 2.0
     jitter_percent: float = 0.0
     delivery: str = "sendinput"
+    pin_window: bool = False
     position_mode: str = "cursor"
     fixed_x: int = 0
     fixed_y: int = 0
@@ -115,6 +116,7 @@ class Settings:
         out.delivery = choice(
             "delivery", ("sendinput", "direct", "auto"), "sendinput"
         )
+        out.pin_window = boolean("pin_window")
         out.position_mode = choice(
             "position_mode", ("cursor", "fixed"), "cursor"
         )

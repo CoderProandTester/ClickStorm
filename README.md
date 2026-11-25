@@ -39,7 +39,8 @@ with Start-menu shortcuts and an entry in Settings → Apps.
 - Per-run click target from 1 to **25,000 clicks**, a duration limit, or
   unlimited running.
 - All five mouse buttons: left, right, middle, X1 and X2.
-- Global hotkeys: **F5 starts**, **F9 stops** (remappable in Settings).
+- Global hotkeys: **F5 starts**, **F9 stops** (remappable in Settings), and
+  **ESC always halts**, even with hotkeys switched off or the window busy.
 - Follow-cursor clicking or a fixed coordinate the cursor is returned to
   while clicking.
 - Optional timing jitter, 0-5 s start delay, always-on-top and
@@ -57,6 +58,9 @@ with Start-menu shortcuts and an entry in Settings → Apps.
   apps that act on posted clicks; and **AUTO**, which uses SendInput up to
   6,000 CPS and direct posting above it, so a 25,000 CPS setting really does
   deliver 25,000 CPS wherever the target accepts posted clicks.
+- Optional **pinned window** (background) clicking: with Direct or AUTO, the
+  window under the cursor is resolved once when the run starts and clicked by
+  handle from then on, so the cursor can move and the window can be covered.
 - Live stats: actual CPS, peak CPS, rate history, progress, ETA, batches,
   input events and failed events.
 - **UPDATES** button: checks the latest GitHub release, lists the installers it
@@ -153,10 +157,14 @@ anything silently.
 | --- | --- |
 | Start clicking | `F5` |
 | Stop clicking | `F9` |
+| Panic stop | `Esc` |
 
-Hotkeys work while the window is unfocused. They are checked on the UI thread
-and the stop key always wins, so a run can always be halted. Both keys can be
-changed under **Settings → Global hotkeys**.
+Hotkeys work while the window is unfocused. They are polled on a dedicated
+daemon thread (`GetAsyncKeyState`) rather than the Tk event loop, so a stop
+lands even while the dashboard is redrawing at 25,000 CPS or a settings dialog
+is open. A stop is written straight to the thread-safe engine, so it does not
+wait for the UI either. The stop key always wins, and both keys can be changed
+under **Settings → Global hotkeys**; **ESC** is fixed and is never disabled.
 
 Clicks stop automatically when the click target is reached, when the duration
 limit expires, or when you press stop. In unlimited mode only stop ends a run.
@@ -198,6 +206,13 @@ limit expires, or when you press stop. In unlimited mode only stop ends a run.
 - **No cursor movement per click.** The mouse is not re-positioned for every
   click; SendInput clicks at the current position (fixed mode returns the
   cursor to its point once per slot).
+- **Pinned target for direct delivery.** With **Pin the window under the
+  cursor** enabled, the direct path resolves the window handle once at the
+  start of the run and posts to it for the whole session. That removes the
+  per-batch `GetCursorPos` + `WindowFromPoint` + `ScreenToClient` work (the
+  fastest direct path) and lets the target be moved or covered. Windows that
+  belong to ClickStorm itself are never used as a target, so a run started
+  from the START button cannot click the app's own controls.
 
 ### Measured speed
 

@@ -189,6 +189,12 @@ user32.GetAncestor.restype = wintypes.HWND
 user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
 user32.SetForegroundWindow.restype = wintypes.BOOL
 
+user32.GetWindowThreadProcessId.argtypes = (
+    wintypes.HWND,
+    ctypes.POINTER(wintypes.DWORD),
+)
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
 user32.GetSystemMetrics.argtypes = (ctypes.c_int,)
 user32.GetSystemMetrics.restype = ctypes.c_int
 
@@ -208,6 +214,8 @@ kernel32.SetThreadPriority.argtypes = (wintypes.HANDLE, ctypes.c_int)
 kernel32.SetThreadPriority.restype = wintypes.BOOL
 
 kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+kernel32.GetCurrentProcessId.argtypes = ()
+kernel32.GetCurrentProcessId.restype = wintypes.DWORD
 kernel32.SetPriorityClass.argtypes = (wintypes.HANDLE, wintypes.DWORD)
 kernel32.SetPriorityClass.restype = wintypes.BOOL
 
@@ -406,6 +414,20 @@ def _root_window(hwnd: int) -> int:
     return int(root or hwnd)
 
 
+def window_process_id(hwnd: int) -> int:
+    pid = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(wintypes.HWND(int(hwnd)), ctypes.byref(pid))
+    return int(pid.value)
+
+
+def is_own_window(hwnd: int) -> bool:
+    """True when ``hwnd`` belongs to this ClickStorm process."""
+    try:
+        return window_process_id(hwnd) == int(kernel32.GetCurrentProcessId())
+    except Exception:
+        return False
+
+
 def resolve_window(x: int, y: int) -> int | None:
     """Find the deepest visible child window at a screen position."""
     hwnd = user32.WindowFromPoint(POINT(int(x), int(y)))
@@ -431,6 +453,10 @@ def resolve_window(x: int, y: int) -> int | None:
 def make_direct_target(x: int, y: int, button: str) -> DirectTarget | None:
     hwnd = resolve_window(x, y)
     if not hwnd:
+        return None
+    if is_own_window(hwnd):
+        # Never post clicks into ClickStorm itself: a run started from the
+        # START button would otherwise click its own controls.
         return None
     point = POINT(int(x), int(y))
     if not user32.ScreenToClient(hwnd, ctypes.byref(point)):

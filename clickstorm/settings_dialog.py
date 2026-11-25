@@ -31,6 +31,7 @@ class SettingsDialog(tk.Toplevel):
         self._closed = False
 
         self.delivery_var = tk.StringVar(value=settings.delivery)
+        self.pin_window_var = tk.BooleanVar(value=settings.pin_window)
         self.position_var = tk.StringVar(value=settings.position_mode)
         self.hotkeys_enabled_var = tk.BooleanVar(value=settings.hotkeys_enabled)
         self.performance_var = tk.BooleanVar(value=settings.performance_mode)
@@ -162,13 +163,21 @@ class SettingsDialog(tk.Toplevel):
             accent=COLORS["accent"],
         )
         self.delivery_segment.pack(anchor="w", pady=(9, 5))
+        theme.CheckPill(
+            inner,
+            "Pin the window under the cursor",
+            self.pin_window_var,
+            bg=COLORS["card"],
+        ).pack(anchor="w", pady=(2, 5))
         theme.make_label(
             inner,
             "SendInput works with everything, but Windows caps real injected "
             "input near 6,000 CPS. Direct posts button messages straight to "
             "the window, which reaches the full 25,000 CPS but only works "
             "with classic Win32 windows. AUTO uses Direct above 6,000 CPS and "
-            "SendInput below it.",
+            "SendInput below it. Pinning keeps the window found under the "
+            "cursor when the run starts, so you can move the mouse and even "
+            "cover the window while it is clicked.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
             justify="left", wraplength=340,
         ).pack(anchor="w")
@@ -285,7 +294,8 @@ class SettingsDialog(tk.Toplevel):
             combo.pack(side="right")
         theme.make_label(
             inner,
-            "The stop hotkey is checked first, so it always wins.",
+            "The stop hotkey is checked first, so it always wins. ESC always "
+            "halts a run, even with hotkeys off or the window busy.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
         ).pack(anchor="w", pady=(7, 0))
 
@@ -495,6 +505,7 @@ class SettingsDialog(tk.Toplevel):
         updated = replace(
             self._settings,
             delivery=self.delivery_var.get(),
+            pin_window=bool(self.pin_window_var.get()),
             position_mode=self.position_var.get(),
             fixed_x=fixed_x,
             fixed_y=fixed_y,
