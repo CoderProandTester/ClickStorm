@@ -91,6 +91,35 @@ def read_report(path: Path, timeout: float = 5.0) -> dict:
     raise RuntimeError(f"counter report was not readable: {last_error}")
 
 
+def settle_report(path: Path, timeout: float = 3.0) -> dict:
+    """Wait for Tk to drain its queue: the count must stop moving."""
+    deadline = time.perf_counter() + timeout
+    last = -1
+    stable_since = time.perf_counter()
+    data = read_report(path)
+    while time.perf_counter() < deadline:
+        if int(data["downs"]) != last:
+            last = int(data["downs"])
+            stable_since = time.perf_counter()
+        elif time.perf_counter() - stable_since >= 0.25:
+            return data
+        time.sleep(0.05)
+        data = read_report(path)
+    return data
+
+
+def write_summary(lines: list[str]) -> None:
+    """Publish diagnostics where the CI job summary exposes them."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines).rstrip() + "\n")
+    except Exception:
+        pass
+
+
 def wait_for_window(title: str, timeout: float = 15.0) -> int:
     deadline = time.perf_counter() + timeout
     while time.perf_counter() < deadline:
@@ -119,7 +148,13 @@ def aim_at_counter(hwnd: int) -> None:
     time.sleep(0.35)
 
 
-def run_session(engine, delivery: str, clicks: int, report: Path) -> tuple[int, float]:
+def run_session(
+    engine,
+    delivery: str,
+    clicks: int,
+    report: Path,
+    require_rate: bool,
+) -> tuple[int, float]:
     from clickstorm.engine import EngineConfig
 
     before = read_report(report)["downs"]
@@ -141,8 +176,7 @@ def run_session(engine, delivery: str, clicks: int, report: Path) -> tuple[int, 
         raise RuntimeError(f"{delivery}: session did not finish within {SESSION_TIMEOUT}s")
 
     # Let the counter's Tk loop drain the last events before reading it.
-    time.sleep(0.5)
-    after = read_report(report)
+    after = settle_report(report)
     stats = engine.get_stats()
     delivered = int(after["downs"]) - int(before)
     print(
@@ -162,7 +196,7 @@ def run_session(engine, delivery: str, clicks: int, report: Path) -> tuple[int, 
         raise RuntimeError(
             f"{delivery}: only {delivered} of {clicks} clicks reached the target"
         )
-    if delivered / elapsed < MIN_DELIVERED_CPS:
+    if require_rate and delivered / elapsed < MIN_DELIVERED_CPS:
         raise RuntimeError(
             f"{delivery}: delivered {delivered / elapsed:,.0f} CPS, "
             f"below the {MIN_DELIVERED_CPS:,.0f} CPS requirement"
@@ -225,21 +259,30 @@ def main() -> int:
         # Re-aim before each run: the previous run must not leave the cursor
         # over something else if the counter moved.
         aim_at_counter(hwnd)
-        run_session(engine, "sendinput", SENDINPUT_CLICKS, report)
+        run_session(engine, "sendinput", SENDINPUT_CLICKS, report, require_rate=True)
         aim_at_counter(hwnd)
-        run_session(engine, "sync", SYNC_CLICKS, report)
+        run_session(engine, "sync", SYNC_CLICKS, report, require_rate=False)
         print("PASS: SENDINPUT delivered at rate and SYNC registered its clicks.")
         return 0
     except Exception as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
+        summary = ["### Delivery test failed", "", "```", f"FAIL: {exc}"]
         try:
-            print("counter report:", read_report(report, timeout=1.0))
+            report_data = read_report(report, timeout=1.0)
+            print("counter report:", report_data)
+            summary.append(f"counter report: {report_data}")
         except Exception:
             pass
         try:
-            print("counter log:", log.read_text(encoding="utf-8", errors="replace"))
+            counter_log = log.read_text(encoding="utf-8", errors="replace")
+            print("counter log:", counter_log)
+            if counter_log.strip():
+                summary.append("counter log:")
+                summary.extend(counter_log.strip().splitlines()[-30:])
         except Exception:
             pass
+        summary.append("```")
+        write_summary(summary)
         return 1
     finally:
         if engine is not None:
