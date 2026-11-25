@@ -80,4 +80,4 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 ; previous onefile app's _PYI_* extraction variables (and a TEMP folder that
 ; Setup deletes on exit), which makes the relaunched app fail to find its
 ; Python DLL. The shell starts it with the user's clean environment instead.
-Filename: "{windows}\explorer.exe"; Parameters: """{app}\{#MyAppExeName}"""; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{win}\explorer.exe"; Parameters: """{app}\{#MyAppExeName}"""; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
