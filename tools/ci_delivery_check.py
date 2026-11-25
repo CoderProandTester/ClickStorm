@@ -270,9 +270,20 @@ def main() -> int:
         engine = make_engine()
         core = getattr(engine, "core_name", "Python")
         if core != "Rust":
-            reason = getattr(engine, "last_fallback_reason", "") or "DLL missing"
+            from clickstorm import native_engine
+
+            reason = (
+                getattr(engine, "last_fallback_reason", "")
+                or native_engine.load_error()
+                or "DLL missing"
+            )
+            candidates = {
+                str(path): os.path.exists(path)
+                for path in native_engine._library_candidates()
+            }
             raise RuntimeError(
-                f"the fastest engine is not in use: core is {core} ({reason})"
+                f"the fastest engine is not in use: core is {core} ({reason}); "
+                f"candidates {candidates}"
             )
         print(f"core: {core} ({getattr(engine, 'backend_name', 'Ultimate')})")
 
