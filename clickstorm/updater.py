@@ -15,6 +15,7 @@ import re
 import struct
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -35,6 +36,24 @@ ARCH_NAMES = {"x64": "64-bit", "x86": "32-bit", "arm64": "ARM64"}
 
 class UpdateError(Exception):
     """A user-facing update failure."""
+
+
+def log_error(context: str, message: str) -> None:
+    """Append an update failure to ``%APPDATA%\\ClickStorm\\error.log``.
+
+    The update window can only show a message box, so this keeps the exact
+    failure text recoverable after the dialog is closed.
+    """
+    try:
+        from .settings import settings_path
+
+        path = settings_path().parent
+        path.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with (path / "error.log").open("a", encoding="utf-8") as handle:
+            handle.write(f"\n[{stamp}] {context}\n{message}\n")
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
@@ -260,8 +279,14 @@ def launch_installer(path: Path) -> None:
     try:
         # /CLOSEAPPLICATIONS lets Inno close ClickStorm itself if it is still
         # shutting down, instead of stopping on a "file in use" prompt.
+        # The standard handles are redirected explicitly because a windowed
+        # PyInstaller build has no console: inheriting the missing std handles
+        # is what makes Popen fail there with an invalid-handle style error.
         subprocess.Popen(
             [installer, "/NORESTART", "/CLOSEAPPLICATIONS", "/SP-"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             close_fds=True,
         )
     except Exception as exc:

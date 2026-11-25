@@ -79,6 +79,7 @@ INFINITE = 0xFFFFFFFF
 
 ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
 HIGH_PRIORITY_CLASS = 0x00000080
+NORMAL_PRIORITY_CLASS = 0x00000020
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +486,30 @@ def post_click(target: DirectTarget) -> bool:
     return down_ok and up_ok
 
 
+def post_clicks(target: DirectTarget, count: int) -> int:
+    """Post up to ``count`` complete clicks and return how many queued.
+
+    Posted messages do not go through the system input queue, so this path can
+    carry a far wider batch than ``SendInput``. Everything is hoisted into
+    locals because this is the hot loop of direct delivery.
+    """
+    if count <= 0:
+        return 0
+    down_msg, up_msg, down_wparam, up_wparam, lparam = direct_messages(
+        target.button, target.x, target.y
+    )
+    post = user32.PostMessageW
+    hwnd = target.hwnd
+    accepted = 0
+    for _ in range(count):
+        if not post(hwnd, down_msg, down_wparam, lparam):
+            break
+        if not post(hwnd, up_msg, up_wparam, lparam):
+            break
+        accepted += 1
+    return accepted
+
+
 # ---------------------------------------------------------------------------
 # System setup
 # ---------------------------------------------------------------------------
@@ -570,6 +595,14 @@ def switch_to_thread() -> bool:
 def set_process_priority(high: bool = True) -> bool:
     priority = HIGH_PRIORITY_CLASS if high else ABOVE_NORMAL_PRIORITY_CLASS
     return bool(kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), priority))
+
+
+def reset_process_priority() -> bool:
+    return bool(
+        kernel32.SetPriorityClass(
+            kernel32.GetCurrentProcess(), NORMAL_PRIORITY_CLASS
+        )
+    )
 
 
 class HighResTimer:
