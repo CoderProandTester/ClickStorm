@@ -152,7 +152,7 @@ THREAD_PRIORITY_ABOVE_NORMAL = 1
 VK_F6 = 0x75
 VK_ESCAPE = 0x1B
 
-__version__ = "4.5.0"  # keep in sync with clickstorm/__init__.py
+__version__ = "4.6.0"  # keep in sync with clickstorm/__init__.py
 
 DEFAULT_CPS = 25_000.0
 DEFAULT_BATCH = 25

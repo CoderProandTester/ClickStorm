@@ -1,7 +1,18 @@
-"""Advanced settings window for ClickStorm."""
+"""Advanced settings window for ClickStorm.
+
+The full settings set is taller than a 768p screen, so the window is
+resizable and only the two setting columns scroll: the header and the save
+footer stay pinned. That is what keeps SAVE always on screen instead of being
+cut off at the bottom of a fixed-size window.
+
+SAVE writes ``%APPDATA%\\ClickStorm\\settings.json`` before the window closes
+and reports a write failure in place, so a change can never disappear just
+because the dialog closed first.
+"""
 
 from __future__ import annotations
 
+import os
 import tkinter as tk
 from dataclasses import replace
 from tkinter import messagebox, ttk
@@ -13,15 +24,19 @@ from .theme import COLORS
 
 
 class SettingsDialog(tk.Toplevel):
-    WIDTH = 840
-    HEIGHT = 700
+    WIDTH = 900
+    HEIGHT = 740
+    MIN_WIDTH = 720
+    MIN_HEIGHT = 520
+    PAD = 22
 
     def __init__(self, parent, settings: Settings, on_save):
         super().__init__(parent)
         self.withdraw()
         self.title(f"{APP_NAME} - Settings")
         self.configure(bg=COLORS["bg"])
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.minsize(self.MIN_WIDTH, self.MIN_HEIGHT)
         self.transient(parent)
         self._parent = parent
         self._settings = settings
@@ -32,9 +47,6 @@ class SettingsDialog(tk.Toplevel):
 
         self.delivery_var = tk.StringVar(value=settings.delivery)
         self.pin_window_var = tk.BooleanVar(value=settings.pin_window)
-        self.force_python_var = tk.BooleanVar(
-            value=settings.force_python_engine
-        )
         self.position_var = tk.StringVar(value=settings.position_mode)
         self.hotkeys_enabled_var = tk.BooleanVar(value=settings.hotkeys_enabled)
         self.performance_var = tk.BooleanVar(value=settings.performance_mode)
@@ -50,11 +62,15 @@ class SettingsDialog(tk.Toplevel):
         self.lifetime_var = tk.StringVar(
             value=f"{settings.total_clicks:,} clicks"
         )
-        self._total_clicks = settings.total_clicks
+        # Keep the lifetime counter as a number. The previous dialog stored the
+        # whole Settings object here, which made the next load discard the
+        # counter (and wrote a nested object into settings.json).
+        self._total_clicks = max(0, int(settings.total_clicks))
 
         self._build()
         self._position()
         self.bind("<Escape>", lambda _e: self.cancel())
+        self.bind("<Control-s>", lambda _e: self.save())
         self.protocol("WM_DELETE_WINDOW", self.cancel)
         self.deiconify()
         self.grab_set()
@@ -66,29 +82,133 @@ class SettingsDialog(tk.Toplevel):
 
     def _build(self):
         outer = tk.Frame(self, bg=COLORS["bg"])
-        outer.pack(fill="both", expand=True, padx=24, pady=20)
+        outer.pack(fill="both", expand=True)
 
+        self._build_header(outer)
+        # Packed before the body so the save row can never be pushed off the
+        # bottom of the window.
+        self._build_footer(outer)
+        self._build_body(outer)
+
+    def _build_header(self, outer):
         header = tk.Frame(outer, bg=COLORS["bg"])
-        header.pack(fill="x", pady=(0, 14))
+        header.pack(fill="x", padx=self.PAD, pady=(16, 12))
+
+        block = tk.Frame(header, bg=COLORS["bg"])
+        block.pack(side="left")
         theme.make_label(
-            header, "Advanced settings", size=20, bold=True,
-            bg=COLORS["bg"],
+            block, "Settings", size=20, bold=True, bg=COLORS["bg"]
         ).pack(anchor="w")
         theme.make_label(
-            header,
-            "Fine-tune the engine. Changes apply to your next run.",
+            block,
+            "One engine, tuned your way. Changes are written to disk.",
             size=9, color=COLORS["muted"], bg=COLORS["bg"],
         ).pack(anchor="w", pady=(2, 0))
 
-        body = tk.Frame(outer, bg=COLORS["bg"])
-        body.pack(fill="both", expand=True)
-        body.grid_columnconfigure(0, weight=1, uniform="settings")
-        body.grid_columnconfigure(1, weight=1, uniform="settings")
+        badge = tk.Frame(
+            header,
+            bg=COLORS["card2"],
+            highlightbackground=COLORS["border_soft"],
+            highlightthickness=1,
+        )
+        badge.pack(side="right")
+        theme.make_label(
+            badge,
+            f"v{APP_VERSION}",
+            size=8, bold=True, color=COLORS["accent"], bg=COLORS["card2"],
+        ).pack(padx=10, pady=5)
 
-        left = tk.Frame(body, bg=COLORS["bg"])
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        right = tk.Frame(body, bg=COLORS["bg"])
-        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        tk.Frame(outer, bg=COLORS["border_soft"], height=1).pack(
+            fill="x", padx=self.PAD
+        )
+
+    def _build_footer(self, outer):
+        footer = tk.Frame(
+            outer,
+            bg=COLORS["panel"],
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+        )
+        footer.pack(side="bottom", fill="x", pady=(12, 0))
+        inner = tk.Frame(footer, bg=COLORS["panel"])
+        inner.pack(fill="x", padx=self.PAD, pady=12)
+
+        self.save_button = theme.PillButton(
+            inner,
+            text="SAVE SETTINGS",
+            command=self.save,
+            width=200,
+            height=44,
+            bg=COLORS["panel"],
+            fill=COLORS["accent"],
+            hover=COLORS["cyan"],
+            active=COLORS["accent"],
+            fg=COLORS["bg"],
+            font_size=10,
+        )
+        self.save_button.pack(side="right")
+
+        theme.PillButton(
+            inner,
+            text="CANCEL",
+            command=self.cancel,
+            width=130,
+            height=44,
+            bg=COLORS["panel"],
+            fill=COLORS["card2"],
+            hover=COLORS["card3"],
+            fg=COLORS["text_dim"],
+            font_size=10,
+        ).pack(side="right", padx=(0, 10))
+
+        self._path_label = tk.Label(
+            inner,
+            text=f"Saved to {settings_path()}",
+            bg=COLORS["panel"],
+            fg=COLORS["faint"],
+            font=theme.font(8),
+            justify="left",
+            anchor="w",
+            wraplength=300,
+        )
+        self._path_label.pack(side="left", fill="x", expand=True)
+
+    def _build_body(self, outer):
+        body = tk.Frame(outer, bg=COLORS["bg"])
+        body.pack(fill="both", expand=True, padx=(self.PAD, 12), pady=(0, 0))
+
+        self.canvas = tk.Canvas(
+            body,
+            bg=COLORS["bg"],
+            highlightthickness=0,
+            bd=0,
+            yscrollincrement=28,
+        )
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        self.scrollbar = theme.SlimScrollbar(
+            body, command=self.canvas.yview, bg=COLORS["bg"]
+        )
+        self.scrollbar.pack(side="right", fill="y", padx=(8, 0))
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.bind("<MouseWheel>", self._on_wheel)
+
+        self.inner = tk.Frame(self.canvas, bg=COLORS["bg"])
+        self._inner_window = self.canvas.create_window(
+            (0, 0), window=self.inner, anchor="nw"
+        )
+        self.inner.bind("<Configure>", self._on_inner_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+        content = tk.Frame(self.inner, bg=COLORS["bg"])
+        content.pack(fill="both", expand=True, pady=(14, 6))
+        content.grid_columnconfigure(0, weight=1, uniform="settingscol")
+        content.grid_columnconfigure(1, weight=1, uniform="settingscol")
+
+        left = tk.Frame(content, bg=COLORS["bg"])
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 9))
+        right = tk.Frame(content, bg=COLORS["bg"])
+        right.grid(row=0, column=1, sticky="nsew", padx=(9, 0))
 
         self._build_delivery(left)
         self._build_timing(left)
@@ -98,41 +218,42 @@ class SettingsDialog(tk.Toplevel):
         self._build_performance(right)
         self._build_data(right)
 
-        footer = tk.Frame(outer, bg=COLORS["bg"])
-        footer.pack(fill="x", pady=(16, 0))
+        self._bind_wheel(self.inner)
 
-        theme.PillButton(
-            footer,
-            text="CANCEL",
-            command=self.cancel,
-            width=130,
-            height=42,
-            bg=COLORS["bg"],
-            fill=COLORS["card2"],
-            hover=COLORS["card3"],
-            fg=COLORS["text_dim"],
-            font_size=10,
-        ).pack(side="right")
+    # -- scrollable body ------------------------------------------------
 
-        theme.PillButton(
-            footer,
-            text="SAVE CHANGES",
-            command=self.save,
-            width=190,
-            height=42,
-            bg=COLORS["bg"],
-            fill=COLORS["accent"],
-            hover=COLORS["cyan"],
-            active=COLORS["accent"],
-            fg=COLORS["bg"],
-            font_size=10,
-        ).pack(side="right", padx=(0, 10))
+    def _on_inner_configure(self, _event=None):
+        try:
+            bounds = self.canvas.bbox("all")
+        except Exception:
+            return
+        if bounds:
+            self.canvas.configure(
+                scrollregion=(0, 0, bounds[2], bounds[3] + 4)
+            )
 
-        theme.make_label(
-            footer,
-            "Hotkeys work globally, even while ClickStorm is minimized.",
-            size=8, color=COLORS["faint"], bg=COLORS["bg"],
-        ).pack(side="left", pady=6)
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfigure(
+            self._inner_window, width=max(1, event.width)
+        )
+
+    def _bind_wheel(self, widget):
+        for child in widget.winfo_children():
+            self._bind_wheel(child)
+        try:
+            widget.bind("<MouseWheel>", self._on_wheel)
+        except Exception:
+            pass
+
+    def _on_wheel(self, event):
+        if self._closed:
+            return None
+        first, last = self.canvas.yview()
+        if first <= 0.0 and last >= 1.0:
+            return None
+        step = -3 if event.delta > 0 else 3
+        self.canvas.yview_scroll(step, "units")
+        return "break"
 
     def _section(self, parent, title, subtitle=None):
         card = theme.Card(parent)
@@ -145,55 +266,55 @@ class SettingsDialog(tk.Toplevel):
         if subtitle:
             theme.make_label(
                 inner, subtitle, size=8, color=COLORS["faint"],
-                justify="left", wraplength=350,
+                justify="left", wraplength=360,
             ).pack(anchor="w", pady=(2, 0))
         return inner
 
     def _build_delivery(self, parent):
-        inner = self._section(parent, "Delivery")
+        inner = self._section(
+            parent,
+            "Delivery",
+            "SYNC is the default: the target handles each click before the "
+            "next one is sent, so nothing waits in a queue.",
+        )
         self.delivery_segment = theme.SegmentedControl(
             inner,
             options=(
-                ("sendinput", "SENDINPUT"),
-                ("direct", "DIRECT"),
                 ("sync", "SYNC"),
                 ("auto", "AUTO"),
+                ("direct", "DIRECT"),
+                ("sendinput", "SENDINPUT"),
             ),
             variable=self.delivery_var,
             bg=COLORS["card"],
-            button_width=78,
+            button_width=84,
             button_height=32,
             font_size=8,
+            gap=5,
             accent=COLORS["accent"],
         )
-        self.delivery_segment.pack(anchor="w", pady=(9, 5))
+        self.delivery_segment.pack(anchor="w", pady=(9, 6))
         theme.CheckPill(
             inner,
             "Pin the window under the cursor",
             self.pin_window_var,
             bg=COLORS["card"],
-        ).pack(anchor="w", pady=(2, 5))
+        ).pack(anchor="w", pady=(0, 6))
         theme.make_label(
             inner,
-            "SendInput works with everything, but Windows caps real injected "
-            "input near 6,000 CPS. Direct posts button messages to the window "
-            "and skips the input queue, but Windows caps a posted-message "
-            "queue at 10,000 and drops the rest. SYNC sends each click with "
-            "SendMessageTimeout instead: the window handles it before the "
-            "call returns, so nothing waits in that queue and every click is "
-            "registered - at the speed the window's own message handler can "
-            "run. AUTO uses SYNC above 6,000 CPS and SendInput below it. "
-            "Pinning keeps the window found under the cursor when the run "
-            "starts, so you can move the mouse and cover the window.",
+            "AUTO uses SYNC above 6,000 CPS and SendInput below. DIRECT posts "
+            "button messages and skips the input queue, but Windows caps a "
+            "posted queue near 10,000. SENDINPUT works with everything, but "
+            "Windows caps injected input near 6,000 CPS.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
-            justify="left", wraplength=340,
+            justify="left", wraplength=360,
         ).pack(anchor="w")
 
     def _build_timing(self, parent):
         inner = self._section(
             parent,
             "Timing",
-            "Precision pacing uses a high-resolution timer and a dedicated thread.",
+            "High-resolution pacing on a dedicated thread.",
         )
         row = tk.Frame(inner, bg=COLORS["card"])
         row.pack(fill="x", pady=(8, 0))
@@ -234,7 +355,7 @@ class SettingsDialog(tk.Toplevel):
             options=(("cursor", "FOLLOW CURSOR"), ("fixed", "FIXED POINT")),
             variable=self.position_var,
             bg=COLORS["card"],
-            button_width=138,
+            button_width=150,
             button_height=32,
             font_size=8,
         )
@@ -245,11 +366,11 @@ class SettingsDialog(tk.Toplevel):
         theme.make_label(
             row, "X", size=8, bold=True, color=COLORS["muted"]
         ).pack(side="left")
-        self._entry(row, self.x_var, width=6).pack(side="left", padx=(5, 12))
+        self._entry(row, self.x_var, width=6).pack(side="left", padx=(5, 10))
         theme.make_label(
             row, "Y", size=8, bold=True, color=COLORS["muted"]
         ).pack(side="left")
-        self._entry(row, self.y_var, width=6).pack(side="left", padx=(5, 12))
+        self._entry(row, self.y_var, width=6).pack(side="left", padx=(5, 10))
         self._capture_button = theme.PillButton(
             row,
             text="CAPTURE IN 3s",
@@ -266,9 +387,10 @@ class SettingsDialog(tk.Toplevel):
 
         theme.make_label(
             inner,
-            "Fixed point returns the cursor to these coordinates while clicking.",
+            "Fixed point returns the cursor to these coordinates while "
+            "clicking.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
-            justify="left", wraplength=340,
+            justify="left", wraplength=360,
         ).pack(anchor="w", pady=(7, 0))
 
     def _build_hotkeys(self, parent):
@@ -304,6 +426,7 @@ class SettingsDialog(tk.Toplevel):
             "The stop hotkey is checked first, so it always wins. ESC always "
             "halts a run, even with hotkeys off or the window busy.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
+            justify="left", wraplength=360,
         ).pack(anchor="w", pady=(7, 0))
 
     def _build_performance(self, parent):
@@ -325,25 +448,19 @@ class SettingsDialog(tk.Toplevel):
             "Minimize when a run starts",
             self.minimize_var,
             bg=COLORS["card"],
-        ).pack(anchor="w", pady=4)
-        theme.CheckPill(
-            inner,
-            "Force the Python engine",
-            self.force_python_var,
-            bg=COLORS["card"],
-        ).pack(anchor="w", pady=4)
+        ).pack(anchor="w", pady=(4, 6))
         theme.make_label(
             inner,
-            "The Rust core is used when available and falls back to Python "
-            "automatically if it cannot start. Force Python to skip the "
-            "native DLL entirely. ClickStorm asks Windows for a "
-            "high-resolution timer only while clicking.",
+            "There is one engine: the native Rust core and the Python core "
+            "share the same pacing, delivery and limits. If the native DLL is "
+            "missing or cannot start a run, the Python core takes over "
+            "automatically, so there is nothing to choose here.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
-            justify="left", wraplength=340,
-        ).pack(anchor="w", pady=(6, 0))
+            justify="left", wraplength=360,
+        ).pack(anchor="w")
 
     def _build_data(self, parent):
-        inner = self._section(parent, "Data")
+        inner = self._section(parent, "Data & storage")
         row = tk.Frame(inner, bg=COLORS["card"])
         row.pack(fill="x", pady=(7, 0))
         theme.make_label(
@@ -355,10 +472,29 @@ class SettingsDialog(tk.Toplevel):
             size=10, bold=True, color=COLORS["green"],
         )
         self._lifetime_label.pack(side="right")
-        self._lifetime_var = self.lifetime_var
+        self.lifetime_var.trace_add(
+            "write", lambda *_a: self._lifetime_label.config(
+                text=self.lifetime_var.get()
+            )
+        )
+
+        actions = tk.Frame(inner, bg=COLORS["card"])
+        actions.pack(fill="x", pady=(9, 4))
+        theme.PillButton(
+            actions,
+            text="OPEN SETTINGS FOLDER",
+            command=self._open_settings_folder,
+            width=190,
+            height=30,
+            bg=COLORS["card"],
+            fill=COLORS["card2"],
+            hover=COLORS["card3"],
+            fg=COLORS["text_dim"],
+            font_size=8,
+        ).pack(side="left")
 
         reset = tk.Button(
-            inner,
+            actions,
             text="Reset lifetime total",
             command=self._reset_lifetime,
             bg=COLORS["card2"],
@@ -371,21 +507,20 @@ class SettingsDialog(tk.Toplevel):
             font=theme.font(8),
             cursor="hand2",
             padx=8,
-            pady=3,
+            pady=4,
         )
-        reset.pack(anchor="w", pady=(8, 4))
+        reset.pack(side="right")
 
         theme.make_label(
             inner,
-            f"{APP_NAME} v{APP_VERSION}  |  Win32 per-click input",
+            f"{APP_NAME} v{APP_VERSION}  |  one engine, Win32 per-click input",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
-        ).pack(anchor="w", pady=(2, 0))
-        path_text = str(settings_path())
+        ).pack(anchor="w", pady=(6, 0))
         theme.make_label(
             inner,
-            f"Settings: {path_text}",
+            f"Settings: {settings_path()}",
             size=7, color=COLORS["faint"], bg=COLORS["card"],
-            wraplength=340, justify="left",
+            wraplength=360, justify="left",
         ).pack(anchor="w", pady=(3, 0))
 
     # ------------------------------------------------------------------
@@ -466,8 +601,11 @@ class SettingsDialog(tk.Toplevel):
                 pass
             self._capture_job = None
         if hasattr(self, "_capture_button"):
-            self._capture_button.set_enabled(True)
-            self._capture_button.set_text("CAPTURE IN 3s")
+            try:
+                self._capture_button.set_enabled(True)
+                self._capture_button.set_text("CAPTURE IN 3s")
+            except Exception:
+                pass
 
     def _reset_lifetime(self):
         if messagebox.askyesno(
@@ -478,7 +616,29 @@ class SettingsDialog(tk.Toplevel):
             self._total_clicks = 0
             self.lifetime_var.set("0 clicks")
 
+    def _open_settings_folder(self):
+        folder = settings_path().parent
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(str(folder))  # type: ignore[attr-defined]
+            else:
+                messagebox.showinfo(
+                    "Settings folder", str(folder), parent=self
+                )
+        except Exception as exc:
+            messagebox.showerror(
+                "Could not open the settings folder",
+                f"{folder}\n\n{type(exc).__name__}: {exc}",
+                parent=self,
+            )
+
     def save(self):
+        if self._closed:
+            return
         try:
             delay = float(self.delay_var.get())
         except ValueError:
@@ -534,12 +694,11 @@ class SettingsDialog(tk.Toplevel):
             performance_mode=bool(self.performance_var.get()),
             always_on_top=bool(self.topmost_var.get()),
             minimize_on_start=bool(self.minimize_var.get()),
-            force_python_engine=bool(self.force_python_var.get()),
-            total_clicks=self._total_clicks,
+            total_clicks=max(0, int(self._total_clicks)),
         )
-        # Write the file before the window closes. The old flow destroyed the
-        # dialog first and left persistence to the app callback, so a callback
-        # exception closed the window and silently discarded the changes.
+        # Write the file before the window closes. Destroying the dialog first
+        # and leaving persistence to the app callback is what let a failing
+        # callback close the window and silently discard the changes.
         if not updated.save():
             messagebox.showerror(
                 "Could not save settings",
@@ -580,7 +739,15 @@ class SettingsDialog(tk.Toplevel):
 
     def _position(self):
         self.update_idletasks()
-        width, height = self.WIDTH, self.HEIGHT
+        vx, vy, vw, vh = winapi.virtual_screen_bounds()
+        if vw <= 0 or vh <= 0:
+            vx = vy = 0
+            vw = self.winfo_screenwidth()
+            vh = self.winfo_screenheight()
+
+        width = max(self.MIN_WIDTH, min(self.WIDTH, vw - 80))
+        height = max(self.MIN_HEIGHT, min(self.HEIGHT, vh - 80))
+
         parent = self._parent
         try:
             px = parent.winfo_rootx()
@@ -589,7 +756,10 @@ class SettingsDialog(tk.Toplevel):
             ph = parent.winfo_height()
         except Exception:
             px = py = 0
-            pw = ph = 800
-        x = max(0, px + (pw - width) // 2)
-        y = max(0, py + (ph - height) // 2)
+            pw = ph = width
+
+        x = px + (pw - width) // 2
+        y = py + (ph - height) // 2
+        x = max(vx + 8, min(vx + vw - width - 8, x))
+        y = max(vy + 8, min(vy + vh - height - 8, y))
         self.geometry(f"{width}x{height}+{x}+{y}")

@@ -17,7 +17,7 @@ from . import APP_DATA_DIR
 from .engine import MAX_CLICKS, MAX_CPS, MAX_DURATION, MIN_CPS
 from .winapi import BUTTONS, HOTKEY_KEYS
 
-SETTINGS_VERSION = 3
+SETTINGS_VERSION = 4
 _GEOMETRY_RE = re.compile(r"^\d+x\d+([+-]\d+[+-]\d+)?$")
 
 #: Why the last :meth:`Settings.save` call failed, for the UI to show. Empty
@@ -48,9 +48,8 @@ class Settings:
 
     start_delay: float = 2.0
     jitter_percent: float = 0.0
-    delivery: str = "sendinput"  # sendinput | direct | sync | auto
+    delivery: str = "sync"  # sync | auto | direct | sendinput
     pin_window: bool = False
-    force_python_engine: bool = False
     position_mode: str = "cursor"
     fixed_x: int = 0
     fixed_y: int = 0
@@ -123,10 +122,9 @@ class Settings:
         out.start_delay = number("start_delay", 0.0, 10.0)
         out.jitter_percent = number("jitter_percent", 0.0, 0.75)
         out.delivery = choice(
-            "delivery", ("sendinput", "direct", "sync", "auto"), "sendinput"
+            "delivery", ("sendinput", "direct", "sync", "auto"), "sync"
         )
         out.pin_window = boolean("pin_window")
-        out.force_python_engine = boolean("force_python_engine")
         out.position_mode = choice(
             "position_mode", ("cursor", "fixed"), "cursor"
         )
@@ -162,6 +160,12 @@ class Settings:
             # Version 2 defaults: F5 starts, F9 stops.
             out.hotkey_start = "F5"
             out.hotkey_stop = "F9"
+        if raw_version < 4:
+            # Version 4 makes SYNC the default delivery. Only the untouched
+            # old SENDINPUT default is upgraded, so an explicit Direct, AUTO
+            # or SendInput choice is preserved.
+            if out.delivery == "sendinput":
+                out.delivery = "sync"
 
         if out.hotkey_start == out.hotkey_stop:
             out.hotkey_stop = defaults.hotkey_stop

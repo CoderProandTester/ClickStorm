@@ -78,8 +78,10 @@ properties when changing it:
   `ERROR_TIMEOUT`, which would count an unprocessed click as delivered).
 - **The native fallback is a safety net, not a retry loop.** A native session
   that refuses to start, or errors before delivering any click, restarts once
-  on the Python engine under the same session id. An error after real work is
-  reported to the UI rather than silently retried.
+  on the Python core under the same session id. An error after real work is
+  reported to the UI rather than silently retried. `UltimateEngine` is the
+  only engine object the UI sees: keep the engine unified and do not add a
+  backend picker or a "force Python" setting.
 - **Exact click targets.** Click credit is only spent on clicks Windows
   accepted. Rejected clicks must stay due and be retried rather than silently
   dropped.
@@ -104,6 +106,8 @@ back when the DLL is missing, 32-bit or ABI-mismatched.
 - Use the palette, fonts and widgets in `clickstorm/theme.py`; do not hardcode
   colours or fonts in `app.py`.
 - Keep the dashboard usable at 1050x700 and on high-DPI displays.
+- Keep the settings window scrollable with its save row pinned; never
+  reintroduce a fixed size that can crop the buttons or the save path.
 - New settings must be added to `Settings`, clamped on load, and given a
   migration when the default changes.
 

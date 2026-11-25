@@ -1,12 +1,13 @@
 # ClickStorm
 
-A fast Windows auto clicker with a native Rust click core and a pure Tkinter
+A fast Windows auto clicker with one unified engine and a pure Tkinter
 interface. The engine keeps one pre-allocated `INPUT` batch, paces clicks
-against a monotonic clock and delivers them through Win32 `SendInput` or
-posted window messages. The Rust core (`native/clickstorm-engine`) runs that
-hot loop outside the Python interpreter; when its DLL is absent the app falls
-back to the identical pure Python engine, so a source run needs no toolchain.
-Settings persist in `%APPDATA%\ClickStorm\settings.json`.
+against a monotonic clock and delivers them through synchronous or posted
+window messages or Win32 `SendInput`. The native Rust core
+(`native/clickstorm-engine`) runs that hot loop outside the Python
+interpreter, and the identical Python core takes over automatically when the
+DLL cannot, so a source run needs no toolchain and there is no engine to
+choose. Settings persist in `%APPDATA%\ClickStorm\settings.json`.
 
 Supported on **Windows 10 and Windows 11** (x64, x86 and ARM64). The native
 Rust core is built for 64-bit x64 and ARM64; the 32-bit build uses the Python
@@ -40,19 +41,21 @@ with Start-menu shortcuts and an entry in Settings → Apps.
 - Click rates from 1 to **100,000 CPS**, with a logarithmic slider, presets
   and a numeric entry. The gauge always reports what the target actually
   accepted, so an unreachable setting settles at the real ceiling.
-- **Native Rust engine, with a real fallback.** Pacing, adaptive batching,
-  `SendInput` and message delivery all run in `clickstorm_engine.dll` (Rust,
-  no external crates). Python only configures a session and reads counters, so
-  there is no interpreter or garbage collector in the click path. If the DLL
-  cannot start a run, or errors before it has delivered any clicks, that run
-  restarts automatically on the Python engine under the same session. A
-  setting can force the Python engine permanently; the ENGINE strip always
-  says which core is clicking.
+- **One ultimate engine.** Pacing, adaptive batching, `SendInput` and message
+  delivery run in `clickstorm_engine.dll` (Rust, no external crates); Python
+  only configures a session and reads counters, so there is no interpreter or
+  garbage collector in the click path. The same engine ships the Python core,
+  which takes over automatically when the DLL is missing, cannot start a run,
+  or errors before delivering clicks - under the same session id. There is no
+  engine switch to set; the ENGINE strip just reports which core is clicking.
 - Per-run click target from 1 to **25,000 clicks**, a duration limit, or
   unlimited running.
 - All five mouse buttons: left, right, middle, X1 and X2.
 - Global hotkeys: **F5 starts**, **F9 stops** (remappable in Settings), and
   **ESC always halts**, even with hotkeys switched off or the window busy.
+- A scrollable, resizable settings window with SAVE always pinned on screen;
+  it writes `%APPDATA%\ClickStorm\settings.json` before closing and reports a
+  write failure in place.
 - Follow-cursor clicking or a fixed coordinate the cursor is returned to
   while clicking.
 - Optional timing jitter, 0-5 s start delay, always-on-top and
@@ -64,15 +67,16 @@ with Start-menu shortcuts and an entry in Settings → Apps.
 - Small adaptive `SendInput` calls: one click per call at first, widening only
   while calls stay far cheaper than a slot, because wide arrays are measurably
   slower once an app throttles input.
-- Four delivery modes: **SendInput**, which every app and game accepts and
-  which Windows caps at roughly 6,000-7,000 CPS here; **direct window
-  messages**, which skip the system input queue but are still asynchronous
-  and capped by the 10,000-message posted queue; **SYNC**, which uses
+- Four delivery modes, defaulting to **SYNC**: **SYNC** uses
   `SendMessageTimeout` so the window handles each click before the call
-  returns and nothing waits in that queue; and **AUTO**, which uses SendInput
-  up to 6,000 CPS and SYNC above it. SYNC is the path that can genuinely
-  register rates above 25,000 in a Win32 window that handles button messages
-  quickly.
+  returns and nothing waits in a queue; **SendInput**, which every app and
+  game accepts but Windows caps at roughly 6,000-7,000 CPS here; **direct
+  window messages**, which skip the system input queue but are still
+  asynchronous and capped by the 10,000-message posted queue; and **AUTO**,
+  which uses SendInput up to 6,000 CPS and SYNC above it. SYNC is the path
+  that can genuinely register rates above 25,000 in a Win32 window that
+  handles button messages quickly, and it falls back to SendInput when there
+  is no other window under the cursor to receive the messages.
 - Optional **pinned window** (background) clicking: with Direct, SYNC or
   AUTO, the window under the cursor is resolved once when the run starts and
   clicked by handle from then on, so the cursor can move and the window can
@@ -95,9 +99,9 @@ python clickstorm.py
 
 Use `pythonw clickstorm.py` if you want to launch without a terminal. The
 source build has no Python dependencies. If `clickstorm_engine.dll` is not
-next to the package the app runs the Python engine and the ENGINE strip says
-`Python engine`; build the DLL with the command in the next section to get
-the native core.
+next to the package the unified engine simply uses its Python core and the
+ENGINE strip says so; build the DLL with the command in the next section to
+get the native core.
 
 ## Gauntlet: the console harness
 
@@ -411,8 +415,11 @@ driver and would end the "single portable exe, no dependencies" promise.
 
 Settings are written atomically. An older settings file is migrated on load
 (version 2 moves the default start hotkey to `F5` and caps the click target at
-25,000). Version 3 adds the Force Python engine option; missing keys take
-safe defaults, so upgrading never resets an existing file.
+25,000; version 4 makes SYNC the default delivery and drops the old Force
+Python flag, upgrading only an untouched SendInput default). Missing keys
+take safe defaults, so upgrading never resets an existing file. The settings
+window writes this file when SAVE is pressed and shows the exact path in its
+footer.
 
 ## Contributing
 
@@ -429,9 +436,9 @@ MIT. See [LICENSE](LICENSE).
 clickstorm.py            Entry point (used by AutoClicker.spec)
 gauntlet.py             Standalone console Gauntlet autoclicker (25,000+ CPS)
 native/clickstorm-engine/ Rust click core: pacing, batching, SendInput, direct
-clickstorm/native_engine.py  ctypes binding and Python-fallback selection
+clickstorm/native_engine.py  ctypes binding to the Rust core
 clickstorm/app.py        Main window, hotkeys, session control
-clickstorm/engine.py     Python click engine: pacing, batching, exact targets
+clickstorm/engine.py     Unified engine: native core + Python core, pacing, limits
 clickstorm/winapi.py     Dependency-free Win32 layer (SendInput, cursor, keys)
 clickstorm/settings.py   Persistent settings + migration
 clickstorm/settings_dialog.py  Advanced settings window
@@ -457,7 +464,7 @@ installer/ClickStorm.iss Inno Setup installer recipe
   ceiling: Windows serialises injected input through one system input thread,
   so it delivers roughly 6,000-7,000 clicks per second here no matter how high
   the target is. No user-mode clicker can change that, and wider batches only
-  fill the queue. Set **Settings → Delivery** to **AUTO** (or **SYNC**):
+  fill the queue. Delivery now defaults to **SYNC** (AUTO is the alternative):
   synchronous messages bypass both the input thread and the posted-message
   queue, so a Win32 window that handles button messages quickly registers
   every click. Games and raw-input apps ignore them. Use

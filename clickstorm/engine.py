@@ -434,9 +434,16 @@ class ClickEngine:
                     # target can even be covered by another window.
                     winapi.focus_target(direct_target)
                 direct_point = point
-            if config.delivery == "auto" and direct_target is None:
-                # Nothing to post to under the cursor. An auto run must still
-                # click, so fall back to the universally compatible path.
+            if (
+                direct_target is None
+                and not config.pin_window
+                and config.delivery in ("auto", "sync")
+            ):
+                # Nothing of another process is under the cursor (for example
+                # the cursor is over ClickStorm itself). AUTO and SYNC are
+                # message paths, and without a window they would click into
+                # nothing, so use the universally compatible path instead. An
+                # explicitly pinned window keeps reporting the pinned hint.
                 delivery = "sendinput"
 
         # Built once per session. Every SendInput call reuses this array and
@@ -749,15 +756,23 @@ class ClickEngine:
         return winapi.get_cursor_pos()
 
 
-class ResilientEngine:
-    """One engine facade: native first, Python after an immediate failure.
+class UltimateEngine:
+    """ClickStorm's one engine: the native core plus the Python core.
 
-    The native core is tried first. If it refuses to start, or errors before
-    it has delivered a meaningful run, the same configuration is restarted on
-    the Python engine and the run continues under one stable session id, so
-    the UI never sees a failed run. An error after real work is still reported
-    normally - a fallback must not hide a session that was already clicking.
+    Both cores implement the same pacing, batching, limiting and delivery
+    contract, so the rest of the app only ever sees a single engine. The
+    native Rust core is used whenever its DLL loads; if it refuses to start,
+    or errors before it has delivered a meaningful run, the same configuration
+    restarts on the Python core under one stable session id, so the UI never
+    sees a failed run. An error after real work is still reported normally - a
+    fallback must not hide a session that was already clicking.
+
+    There is no engine switch anywhere in the UI: :func:`make_engine` returns
+    this class on every machine, and the ENGINE strip only reports which core
+    is delivering right now.
     """
+
+    backend_name = "Ultimate"
 
     _COUNTERS = (
         "clicks_sent",
@@ -776,12 +791,14 @@ class ResilientEngine:
         primary,
         fallback_factory=ClickEngine,
         immediate_window: float = 0.75,
+        primary_name: str = "Rust",
     ) -> None:
         self._primary = primary
+        self._primary_name = primary_name
         self._fallback_factory = fallback_factory
         self._fallback = None
         self._active = primary
-        self._native_active = True
+        self._using_fallback = False
         self._immediate_window = immediate_window
         self._lock = threading.Lock()
         self._session_id = 0
@@ -795,7 +812,14 @@ class ResilientEngine:
 
     @property
     def backend_name(self) -> str:
-        return "Rust" if self._native_active else "Python"
+        return "Ultimate"
+
+    @property
+    def core_name(self) -> str:
+        """The core delivering right now: ``Rust`` or ``Python``."""
+        if self._using_fallback or self._primary_name == "Python":
+            return "Python"
+        return self._primary_name
 
     @property
     def last_fallback_reason(self) -> str:
@@ -810,23 +834,32 @@ class ResilientEngine:
             self._offsets = {name: 0 for name in self._COUNTERS}
             self._elapsed_offset = 0.0
             self._fallback_reason = ""
-            self._native_active = True
+            self._using_fallback = False
             self._active = self._primary
 
             started = False
             try:
                 started = bool(self._primary.start(config))
             except Exception as exc:  # a broken DLL must not kill the app
-                self._fallback_reason = f"native engine failed to start: {exc}"
+                self._fallback_reason = f"native core failed to start: {exc}"
 
             if not started:
                 if not self._fallback_reason:
-                    self._fallback_reason = "native engine refused to start"
-                # The native engine never began this session, so its stats
+                    self._fallback_reason = (
+                        f"{self._primary_name} core refused to start"
+                    )
+                # The primary core never began this session, so its stats
                 # still describe an older run and must not be carried over.
                 if not self._switch_to_fallback(collect=False):
                     return False
-                if not self._fallback.start(config):
+                try:
+                    started = bool(self._fallback.start(config))
+                except Exception as exc:
+                    self._fallback_reason = (
+                        f"Python core failed to start: {exc}"
+                    )
+                    started = False
+                if not started:
                     return False
 
             self._session_id += 1
@@ -859,17 +892,20 @@ class ResilientEngine:
         with self._lock:
             if not self._started:
                 return []
-            if not self._native_active:
+            if self._using_fallback:
                 return self._rewrite(self._fallback.poll_events())
 
-            events = self._primary.poll_events()
+            try:
+                events = self._primary.poll_events()
+            except Exception:
+                events = []
             for event in events:
                 if event.kind == "error" and self._failed_immediately():
-                    reason = event.message or "native engine errored immediately"
+                    reason = event.message or "native core errored immediately"
                     if self._switch_to_fallback() and self._fallback.start(
                         self._config
                     ):
-                        # The run continues on the Python engine under the
+                        # The run continues on the Python core under the
                         # same session id; the UI only sees the restored run.
                         self._fallback_reason = reason
                         return []
@@ -882,7 +918,7 @@ class ResilientEngine:
     def get_stats(self) -> EngineStats:
         with self._lock:
             stats = self._active.get_stats()
-            if self._native_active:
+            if not self._using_fallback:
                 return replace(stats, session_id=self._session_id)
             elapsed = stats.elapsed + self._elapsed_offset
             total_clicks = stats.clicks_sent + self._offsets["clicks_sent"]
@@ -911,6 +947,8 @@ class ResilientEngine:
     # -- internals ------------------------------------------------------
 
     def _switch_to_fallback(self, collect: bool = True) -> bool:
+        if self._fallback_factory is None:
+            return False
         if self._fallback is None:
             try:
                 self._fallback = self._fallback_factory()
@@ -934,10 +972,10 @@ class ResilientEngine:
         if self._primary.is_running():
             # Never run two clickers side by side just to recover a run.
             self._fallback_reason = (
-                "native engine did not stop; refusing to start a second clicker"
+                "native core did not stop; refusing to start a second clicker"
             )
             return False
-        self._native_active = False
+        self._using_fallback = True
         self._active = self._fallback
         return True
 
@@ -969,22 +1007,30 @@ class ResilientEngine:
         ]
 
 
-def make_engine(force_python: bool = False):
-    """Return the best available engine behind the one ClickEngine API.
+def make_engine():
+    """Return ClickStorm's single click engine.
 
-    ``force_python`` is the user-facing escape hatch for machines where the
-    native DLL loads but cannot click. Otherwise the Rust core is wrapped in a
-    :class:`ResilientEngine`, which restarts an immediately failing native
-    session on the Python engine instead of showing a failed run.
+    The native Rust core and the pure Python core are wrapped together in one
+    :class:`UltimateEngine`. The native core is used when its DLL is present;
+    the Python core takes over automatically when the DLL is missing, cannot
+    start, or a native session fails before delivering clicks. Callers get one
+    engine object and never choose a backend.
     """
-    if force_python:
-        return ClickEngine()
+    native = None
     try:
         from .native_engine import create_native_engine
 
-        engine = create_native_engine()
-        if engine is not None:
-            return ResilientEngine(engine)
+        native = create_native_engine()
     except Exception:
-        pass
-    return ClickEngine()
+        native = None
+    if native is not None:
+        return UltimateEngine(
+            native,
+            fallback_factory=ClickEngine,
+            primary_name="Rust",
+        )
+    return UltimateEngine(
+        ClickEngine(),
+        fallback_factory=None,
+        primary_name="Python",
+    )

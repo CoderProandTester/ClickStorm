@@ -15,7 +15,7 @@ import traceback
 from collections import deque
 from tkinter import messagebox
 
-from . import APP_NAME, APP_TAGLINE
+from . import APP_NAME, APP_TAGLINE, APP_VERSION
 from . import theme, winapi
 from .engine import (
     EngineConfig,
@@ -122,9 +122,8 @@ class ClickStormApp:
     def __init__(self, root: tk.Tk, settings: Settings):
         self.root = root
         self.settings = settings
-        self.engine = make_engine(bool(settings.force_python_engine))
-        self._engine_force_python = bool(settings.force_python_engine)
-        self._shown_backend = getattr(self.engine, "backend_name", "Python")
+        self.engine = make_engine()
+        self._shown_backend = getattr(self.engine, "core_name", "Python")
 
         self.shutdown = False
         self._save_job = None
@@ -344,7 +343,7 @@ class ClickStormApp:
         ).pack(anchor="w")
         theme.make_label(
             name_block,
-            "ULTRA-FAST AUTO CLICKER  /  WINDOWS",
+            f"ULTRA-FAST AUTO CLICKER  /  WINDOWS  \u00b7  v{APP_VERSION}",
             size=7, bold=True, color=COLORS["accent"], bg=COLORS["bg"],
         ).pack(anchor="w", pady=(0, 1))
 
@@ -686,7 +685,8 @@ class ClickStormApp:
         header = tk.Frame(inner, bg=COLORS["card"])
         header.pack(fill="x")
         theme.make_label(
-            header, "ENGINE", size=8, bold=True, color=COLORS["muted"]
+            header, "ULTIMATE ENGINE", size=8, bold=True,
+            color=COLORS["muted"],
         ).pack(side="left")
         theme.PillButton(
             header,
@@ -713,10 +713,34 @@ class ClickStormApp:
 
         badge_row = tk.Frame(inner, bg=COLORS["card"])
         badge_row.pack(fill="x")
+        self.core_badge_var = tk.StringVar(value="RUST CORE")
+        core_badge = tk.Frame(
+            badge_row,
+            bg=COLORS["card2"],
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+        )
+        core_badge.pack(side="left", padx=(0, 6))
+        self.core_badge_dot = tk.Label(
+            core_badge,
+            text="\u25cf",
+            bg=COLORS["card2"],
+            fg=COLORS["accent"],
+            font=theme.font(7),
+        )
+        self.core_badge_dot.pack(side="left", padx=(7, 3), pady=4)
+        tk.Label(
+            core_badge,
+            textvariable=self.core_badge_var,
+            bg=COLORS["card2"],
+            fg=COLORS["muted"],
+            font=theme.font(7, "bold"),
+        ).pack(side="left", padx=(0, 7), pady=4)
+
         for text, color in (
-            ("SMALL BATCHES", COLORS["accent"]),
+            ("AUTO FALLBACK", COLORS["purple"]),
             ("HIGH-RES TIMER", COLORS["green"]),
-            ("EXACT TARGET", COLORS["purple"]),
+            ("EXACT TARGET", COLORS["accent"]),
         ):
             badge = tk.Frame(
                 badge_row,
@@ -1058,7 +1082,7 @@ class ClickStormApp:
                 "AUTO - Sync above "
                 f"{fmt_rate(SENDINPUT_CEILING_CPS)} CPS"
             ),
-        }.get(self.settings.delivery, "SendInput, small adaptive batches")
+        }.get(self.settings.delivery, "Synchronous window messages")
         position = (
             "Follow cursor"
             if self.settings.position_mode == "cursor"
@@ -1074,13 +1098,23 @@ class ClickStormApp:
             if self.settings.pin_window and self.settings.delivery != "sendinput"
             else ""
         )
-        backend = getattr(self.engine, "backend_name", "Python")
-        if getattr(self.engine, "last_fallback_reason", ""):
-            backend += " (fallback)"
+        core = getattr(self.engine, "core_name", "Python")
+        fallback = getattr(self.engine, "last_fallback_reason", "")
+        if fallback and core == "Python":
+            core_text = "Python core, automatic fallback"
+        else:
+            core_text = f"{core} core"
         self.engine_info_var.set(
-            f"{backend} engine  \u00b7  {delivery}  \u00b7  {position}{pinned}{jitter}\n"
-            f"Three-tier wait  \u00b7  high-priority click thread"
+            f"{core_text}  \u00b7  {delivery}  \u00b7  {position}{pinned}{jitter}\n"
+            f"One engine, native + Python  \u00b7  high-resolution timer"
         )
+        try:
+            self.core_badge_var.set(f"{core.upper()} CORE")
+            self.core_badge_dot.config(
+                fg=COLORS["accent"] if core == "Rust" else COLORS["amber"]
+            )
+        except Exception:
+            pass
 
     def _update_footer_idle(self) -> None:
         delay = self._start_delay
@@ -1089,10 +1123,11 @@ class ClickStormApp:
         else:
             delay_text = "instant start"
         mode = {
-            "direct": "Direct",
             "sync": "Sync",
             "auto": "AUTO (sync) delivery",
-        }.get(self.settings.delivery, "SendInput")
+            "direct": "Direct",
+            "sendinput": "SendInput",
+        }.get(self.settings.delivery, "Sync")
         self.footer_title_var.set("Ready to click")
         self.footer_sub_var.set(
             f"{delay_text}  \u00b7  {mode}  \u00b7  "
@@ -1438,9 +1473,6 @@ class ClickStormApp:
         if not self._validate_rate():
             return
 
-        # A change to Force Python made while a run was active applies here.
-        self._apply_engine_choice()
-
         self.settings.cps = self._rate
         self.settings.mouse_button = self.mouse_button_var.get()
         self.settings.limit_mode = self._limit_mode
@@ -1701,11 +1733,12 @@ class ClickStormApp:
         try:
             self._poll_engine_events()
 
-            # A native session may have fallen back to Python mid-run; show
-            # which core is actually clicking without touching the hot path.
-            backend = getattr(self.engine, "backend_name", "Python")
-            if backend != self._shown_backend:
-                self._shown_backend = backend
+            # The unified engine may swap from the native core to the Python
+            # core mid-run; show which core is clicking without touching the
+            # hot path.
+            core = getattr(self.engine, "core_name", "Python")
+            if core != self._shown_backend:
+                self._shown_backend = core
                 self._refresh_engine_strip()
 
             now = time.perf_counter()
@@ -2018,8 +2051,14 @@ class ClickStormApp:
 
     def _on_settings_saved(self, new_settings: Settings) -> None:
         old_cps = self._rate
+        geometry = self.settings.window_geometry
+        try:
+            geometry = self.root.geometry()
+        except Exception:
+            pass
         self.settings = new_settings
         self.settings.cps = old_cps
+        self.settings.window_geometry = geometry
         self._start_delay = self.settings.start_delay
         self.delay_var.set(f"{self._start_delay:.1f}")
         try:
@@ -2030,7 +2069,6 @@ class ClickStormApp:
         self._update_rate_hint()
         self._update_limit_summary()
         self._update_footer_idle()
-        self._apply_engine_choice()
         # The dialog writes the file itself before it closes, so a failure is
         # reported there instead of being swallowed here. This second write
         # only covers callers that build a Settings object directly.
@@ -2069,32 +2107,6 @@ class ClickStormApp:
             self.settings.save()
         except Exception:
             _log_exception("Saving settings")
-
-    # ------------------------------------------------------------------
-    # Engine choice
-    # ------------------------------------------------------------------
-
-    def _apply_engine_choice(self) -> None:
-        """Rebuild the click engine when the Force Python setting changes.
-
-        A run that is already clicking keeps the engine it started with; the
-        change applies to the next run, so toggling the setting can never
-        swap the engine out from under a live session.
-        """
-        wanted = bool(self.settings.force_python_engine)
-        if wanted == self._engine_force_python:
-            return
-        if self._run_active or self._countdown_active:
-            return
-        old = self.engine
-        try:
-            old.close(0.5)
-        except Exception:
-            pass
-        self.engine = make_engine(wanted)
-        self._engine_force_python = wanted
-        self._shown_backend = getattr(self.engine, "backend_name", "Python")
-        self._refresh_engine_strip()
 
     # ------------------------------------------------------------------
     # Updates
