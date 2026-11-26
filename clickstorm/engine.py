@@ -23,17 +23,19 @@ process.
 Delivery
 --------
 SYNC and SENDINPUT both inject real mouse input with ``SendInput``, so every
-application and game registers them.  SYNC puts exactly one complete click in
-each call, the most compatible form.  SENDINPUT carries one millisecond slot
-of clicks per call (5 clicks at 5,000 CPS, so about 1,000 calls a second
-instead of 5,000), which is what lets the injected rate actually reach the
-cap.  A slow or partially rejected call narrows the batch again.
+application and game registers them.  Both send a batch of clicks in one
+call, because SendInput charges far more for a call than for an event.  SYNC
+starts at one complete click per call and widens to a couple of milliseconds
+of clicks once calls stay clean; SENDINPUT fills a four millisecond budget
+(24 clicks at 6,000 CPS, about 250 calls a second instead of 6,000).  Only a
+rejected call narrows the batch again -- a slow call is not a reason to send
+fewer clicks, because that is what used to cap delivery near 2,000 CPS.
 
-DIRECT is the only message path: it posts ``WM_*BUTTON*`` to the window under
-the cursor.  Posted messages skip the system input queue, but applications
-that read raw input (most games) ignore them and Windows caps the posted queue
-at 10,000 messages, so DIRECT suits classic Win32 windows that answer button
-messages.
+DIRECT is the default and the fastest path: it posts ``WM_*BUTTON*`` to the
+window under the cursor.  Posted messages skip the system input queue, but
+applications that read raw input (most games) ignore them and Windows caps
+the posted queue at 10,000 messages, so DIRECT suits classic Win32 windows
+that answer button messages.
 
 Backlog
 -------
@@ -63,9 +65,9 @@ from . import winapi
 MIN_CPS = 1.0
 # Windows injects SendInput events through one system input thread and lands
 # around 6,000-7,000 delivered CPS before the receiving app becomes the limit,
-# so the app never offers more than 5,000: a higher setting would only make
-# the live gauge disagree with what the target actually receives.
-MAX_CPS = 5_000.0
+# so 6,000 is the highest target the app offers and 5,000 is comfortably
+# inside what the input thread can deliver.
+MAX_CPS = 6_000.0
 MAX_CLICKS = 25_000
 MAX_DURATION = 86_400.0
 
@@ -77,21 +79,30 @@ TICK_SECONDS = 0.001
 # huge batch: that is the slowest possible way to deliver clicks and it makes
 # a running session look frozen.
 MAX_BACKLOG_MS = 20.0
-# Reusable INPUT arrays are sized for this many clicks and never reallocated.
-# A call carries one 1 ms slot of clicks (5 at 5,000 CPS), so the hot loop
-# makes about 1,000 calls a second instead of 5,000 queue-blocking two-event
-# calls. SYNC deliberately stays at one click per call.
-MAX_CHUNK_CLICKS = 32
+# Every SendInput call has a fixed cost that dwarfs the per-event cost, so a
+# call carries a time budget instead of a single millisecond slot. At 6,000
+# CPS the 4 ms SENDINPUT budget is 24 clicks in one call (about 250 calls a
+# second); SYNC starts at one click a call and widens to a 2 ms budget as the
+# target keeps up. Shrinking the batch when a call is slow is what used to
+# collapse delivery to one click per call and cap the peak near 2,000 CPS.
+MAX_CHUNK_CLICKS = 64
 MIN_CHUNK_CLICKS = 1
+SENDINPUT_BATCH_SECONDS = 0.004
+SYNC_BATCH_SECONDS = 0.002
+SYNC_MAX_CLICKS = 8
 # Posted window messages never wait for the system input queue, so direct
-# delivery can carry a much wider batch per call.
-DIRECT_CHUNK_CLICKS = 256
-# A call slower than this is a sign the target is throttling input; widen the
-# batch only while a call stays comfortably inside one millisecond slot.
-CHUNK_SLOW_SECONDS = 0.0008
+# delivery can carry a wider batch per call. 64 clicks is about 10 ms at the
+# 6,000 CPS ceiling, which keeps STOP responsive while still cutting the
+# number of PostMessage loops per second by an order of magnitude.
+DIRECT_CHUNK_CLICKS = 64
+# Grow the batch only after this many clean calls, and only while the call
+# fitted inside the batch's own time budget.
+CHUNK_GROW_BURSTS = 8
 # Wait tiers, in seconds: above YIELD a timer sleeps, between SPIN and YIELD
 # the thread yields its timeslice back to the CPU, below SPIN it spins.
-YIELD_SECONDS = 0.002
+# Sleeping down to 0.5 ms keeps the hot thread from burning a core between
+# four-millisecond batches; oversleep is harmless because credit repays it.
+YIELD_SECONDS = 0.0005
 SPIN_SECONDS = 0.00005
 # Keep retrying through a temporarily swamped input queue (about 0.4 s)
 # before abandoning a run, so a brief stall cannot cut a target short.
@@ -105,7 +116,7 @@ class EngineConfig:
     limit_mode: str = "unlimited"  # unlimited | clicks | duration
     click_limit: int = 5_000
     duration: float = 10.0
-    delivery: str = "sync"  # sync | sendinput | direct
+    delivery: str = "direct"  # direct | sync | sendinput
     pin_window: bool = False
     jitter_percent: float = 0.0
     position_mode: str = "cursor"  # cursor | fixed
@@ -119,15 +130,15 @@ class EngineConfig:
         duration = max(0.05, min(MAX_DURATION, float(self.duration)))
         jitter = max(0.0, min(0.75, float(self.jitter_percent)))
         button = self.button if self.button in winapi.BUTTONS else "Left"
-        # "auto" was retired when the cap dropped below the SendInput
-        # ceiling: every old AUTO configuration now means SYNC.
+        # "auto" was retired when DIRECT became the default: every old AUTO
+        # configuration now means DIRECT, the fastest delivered path.
         delivery = (
-            "sync"
+            "direct"
             if self.delivery == "auto"
             else (
                 self.delivery
                 if self.delivery in ("sendinput", "direct", "sync")
-                else "sync"
+                else "direct"
             )
         )
         position = (
@@ -440,26 +451,38 @@ class ClickEngine:
         # a steady stream at the machine's real ceiling instead of stalling.
         backlog_cap = max(1.0, cps_per_ms * MAX_BACKLOG_MS)
         jitter = config.jitter_percent
-        slot_clicks = max(1, min(MAX_CHUNK_CLICKS, int(cps_per_ms + 0.5)))
+        # A call carries a time budget of clicks, not a single 1 ms slot.
+        # SendInput's fixed per-call cost is what capped high rates before:
+        # five clicks a call needed 1,000 calls a second, and a call that
+        # overran its slot shrank the batch until delivery collapsed to one
+        # click a call. A 4 ms budget makes the same rate need ~250 calls.
+        sendinput_batch = max(
+            MIN_CHUNK_CLICKS,
+            min(MAX_CHUNK_CLICKS, int(round(cps * SENDINPUT_BATCH_SECONDS))),
+        )
         if click_array is not None:
             if delivery == "sync":
-                # SYNC is the compatibility path: one complete click per
-                # SendInput call, so even a target that mishandles a batched
-                # DOWN/UP pair sees every click.
-                chunk_limit = MIN_CHUNK_CLICKS
+                # SYNC is the compatibility path: it begins with one complete
+                # click per call so even a target that dislikes batched
+                # DOWN/UP pairs sees every click, then widens only after the
+                # target has accepted a run of clean calls.
+                chunk_limit = max(
+                    MIN_CHUNK_CLICKS,
+                    min(SYNC_MAX_CLICKS, int(round(cps * SYNC_BATCH_SECONDS))),
+                )
                 chunk = MIN_CHUNK_CLICKS
             else:
-                # SENDINPUT sends one millisecond slot of clicks per call.
-                # At 5,000 CPS that is 5 clicks and about 1,000 calls a
-                # second, instead of 5,000 two-event calls the system input
-                # thread cannot drain fast enough to reach the target rate.
-                chunk_limit = slot_clicks
-                chunk = slot_clicks
+                # SENDINPUT starts at its full time budget: at 6,000 CPS that
+                # is 24 clicks (48 events) per call, about 250 calls a second
+                # instead of the 6,000 two-event calls the input thread
+                # cannot drain fast enough to reach the target rate.
+                chunk_limit = sendinput_batch
+                chunk = sendinput_batch
         else:
-            # Posted messages skip the input queue, so direct delivery can
-            # start at the clicks one slot carries.
+            # Posted messages skip the input queue, so direct delivery starts
+            # at the full time budget as well.
             chunk_limit = DIRECT_CHUNK_CLICKS
-            chunk = max(MIN_CHUNK_CLICKS, min(chunk_limit, slot_clicks))
+            chunk = sendinput_batch
         clean_bursts = 0
         failures = 0
         credit = 0.0
@@ -620,17 +643,20 @@ class ClickEngine:
                         # A clean batch clears a message left by an earlier
                         # rejection so the UI never shows a stale error.
                         self._last_error = ""
-                    if call_seconds < CHUNK_SLOW_SECONDS:
+                    # Grow only while the call fitted inside the batch's own
+                    # time budget: a call that took longer than the clicks it
+                    # carried are worth must not grow, but it is never a
+                    # reason to shrink (shrink-on-slow was the 2,000 CPS cap).
+                    if call_seconds < max(0.001, chunk / cps):
                         clean_bursts += 1
-                        if clean_bursts >= 16 and chunk < chunk_limit:
+                        if (
+                            clean_bursts >= CHUNK_GROW_BURSTS
+                            and chunk < chunk_limit
+                        ):
                             chunk = min(chunk_limit, chunk * 2)
                             clean_bursts = 0
                     else:
-                        # The call already takes longer than a slot: widening
-                        # the array would only make delivery slower.
                         clean_bursts = 0
-                        if chunk > MIN_CHUNK_CLICKS:
-                            chunk = max(MIN_CHUNK_CLICKS, chunk // 2)
                 else:
                     failures += 1
                     clean_bursts = 0
@@ -698,11 +724,11 @@ class ClickEngine:
         """Wait for ``deadline``. Returns False when a stop is requested.
 
         Three tiers, so the wait is cheap but still lands on the deadline: a
-        high-resolution waitable timer above 2 ms, ``SwitchToThread`` between
-        2 ms and 50 us, and a spin only for the last 50 us. Spinning on the
-        last few hundred microseconds instead cost about half a core at
-        1,000 CPS for no accuracy gain. Oversleeping is harmless: the credit
-        maths repays it on the next turn.
+        high-resolution waitable timer above 0.5 ms, ``SwitchToThread``
+        between 0.5 ms and 50 us, and a spin only for the last 50 us.
+        Spinning on the last few hundred microseconds instead cost about half
+        a core at 1,000 CPS for no accuracy gain. Oversleeping is harmless:
+        the credit maths repays it on the next turn.
         """
         while True:
             if self._shutdown or self._stop_requested:
@@ -743,9 +769,10 @@ class UltimateEngine:
     sees a failed run. An error after real work is still reported normally - a
     fallback must not hide a session that was already clicking.
 
-    There is no engine switch anywhere in the UI: :func:`make_engine` returns
-    this class on every machine, and the ENGINE strip only reports which core
-    is delivering right now.
+    The ENGINE setting picks the core: ``Rust`` (the default) wraps the native
+    core in this class, and ``Python`` returns :class:`ClickEngine` directly.
+    The ENGINE strip reports which core is delivering right now, including an
+    automatic fallback from the native core.
     """
 
     _COUNTERS = (
@@ -981,15 +1008,18 @@ class UltimateEngine:
         ]
 
 
-def make_engine():
-    """Return ClickStorm's single click engine.
+def make_engine(preference: str = "rust"):
+    """Return ClickStorm's click engine for the ENGINE setting.
 
-    The native Rust core and the pure Python core are wrapped together in one
-    :class:`UltimateEngine`. The native core is used when its DLL is present;
-    the Python core takes over automatically when the DLL is missing, cannot
-    start, or a native session fails before delivering clicks. Callers get one
-    engine object and never choose a backend.
+    ``preference`` is ``"rust"`` (the default) or ``"python"``. Rust wraps
+    the native core in :class:`UltimateEngine`, which falls back to the Python
+    core automatically when the DLL is missing, cannot start, or a native
+    session fails before delivering clicks. Python returns
+    :class:`ClickEngine` directly, so the native DLL is never loaded.
     """
+    if preference == "python":
+        return ClickEngine()
+
     native = None
     try:
         from .native_engine import create_native_engine

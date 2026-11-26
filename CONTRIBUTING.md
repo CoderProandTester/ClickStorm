@@ -65,12 +65,13 @@ properties when changing it:
 
 - **Never click on the UI thread.** Tk is only touched from the main thread;
   the worker communicates through `poll_events()` and `get_stats()`.
-- **One `SendInput` batch per millisecond slot.** SENDINPUT sends
-  `round(cps / 1000)` clicks per call (5 at 5,000 CPS), which is about 1,000
-  calls a second instead of 5,000. Do not go back to one call per click: the
-  system input thread cannot drain that and the delivered rate falls short of
-  the setting. SYNC deliberately stays at one click per call for
-  compatibility.
+- **A `SendInput` call carries a time budget, not one click.** SENDINPUT
+  sends `round(cps * 0.004)` clicks per call (24 at 6,000 CPS), about 250
+  calls a second; SYNC starts at one click per call and ramps to
+  `round(cps * 0.002)` clicks (capped at 8) once calls stay clean. Never
+  shrink the batch because a call was slow: that collapse to one click per
+  call is what used to cap SENDINPUT near 2,000 delivered CPS. Shrink only
+  when Windows rejects events.
 - **SYNC and SENDINPUT must always use real input.** They call `SendInput`, so
   every app and game registers the clicks. Never route them through window
   messages: raw-input apps silently ignore `WM_*BUTTON*`, which is why the old
@@ -134,8 +135,8 @@ Then check the behaviour you touched manually:
 
 - Start/stop with the buttons and with **F5**/**F9** (including quick taps).
 - Click-target mode ends exactly on the target; duration mode ends on time.
-- Test at low (10 CPS), normal (500-1,000 CPS) and high (4,000-5,000 CPS)
-  rates; 5,000 is the cap.
+- Test at low (10 CPS), normal (500-1,000 CPS) and high (4,000-6,000 CPS)
+  rates; 6,000 is the cap.
 - For delivery or batching changes, run
   `python tools/ci_delivery_check.py` on Windows. It loads the native core,
   starts `tools/click_counter.py`, and verifies the delivered SENDINPUT rate

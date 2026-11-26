@@ -121,7 +121,9 @@ class ClickStormApp:
     def __init__(self, root: tk.Tk, settings: Settings):
         self.root = root
         self.settings = settings
-        self.engine = make_engine()
+        self._engine_preference = getattr(settings, "engine", "rust")
+        self._pending_engine_preference = ""
+        self.engine = make_engine(self._engine_preference)
         self._shown_backend = getattr(self.engine, "core_name", "Python")
 
         self.shutdown = False
@@ -1018,6 +1020,20 @@ class ClickStormApp:
     # Synchronisation / visual refresh
     # ------------------------------------------------------------------
 
+    def _rebuild_engine(self, preference: str) -> None:
+        """Swap the click core without tearing down a running session."""
+        if self.engine.is_running():
+            self._pending_engine_preference = preference
+            return
+        try:
+            self.engine.close()
+        except Exception:
+            pass
+        self._engine_preference = preference
+        self.engine = make_engine(preference)
+        self._shown_backend = getattr(self.engine, "core_name", "Python")
+        self._refresh_engine_strip()
+
     def _sync_from_settings(self) -> None:
         self.mouse_button_var.set(self.settings.mouse_button)
         self.limit_mode_var.set(self.settings.limit_mode)
@@ -1073,10 +1089,10 @@ class ClickStormApp:
 
     def _refresh_engine_strip(self) -> None:
         delivery = {
-            "sync": "SendInput, one click per call",
-            "sendinput": "SendInput, one millisecond slot per call",
-            "direct": "Direct posted window messages",
-        }.get(self.settings.delivery, "SendInput, one click per call")
+            "sync": "SendInput, ramped batches",
+            "sendinput": "SendInput, 4 ms batches",
+            "direct": "Direct posted messages (fastest)",
+        }.get(self.settings.delivery, "Direct posted messages (fastest)")
         position = (
             "Follow cursor"
             if self.settings.position_mode == "cursor"
@@ -1096,11 +1112,15 @@ class ClickStormApp:
         fallback = getattr(self.engine, "last_fallback_reason", "")
         if fallback and core == "Python":
             core_text = "Python core, automatic fallback"
+        elif core == "Python" and self._engine_preference == "python":
+            core_text = "Python core (selected)"
+        elif core == "Python" and self._engine_preference == "rust":
+            core_text = "Python core, Rust DLL unavailable"
         else:
             core_text = f"{core} core"
         self.engine_info_var.set(
             f"{core_text}  \u00b7  {delivery}  \u00b7  {position}{pinned}{jitter}\n"
-            f"One engine, native + Python  \u00b7  high-resolution timer"
+            f"Rust default, Python in Settings  \u00b7  high-resolution timer"
         )
         try:
             self.core_badge_var.set(f"{core.upper()} CORE")
@@ -1120,7 +1140,7 @@ class ClickStormApp:
             "sync": "Sync",
             "direct": "Direct",
             "sendinput": "SendInput",
-        }.get(self.settings.delivery, "Sync")
+        }.get(self.settings.delivery, "Direct")
         self.footer_title_var.set("Ready to click")
         self.footer_sub_var.set(
             f"{delay_text}  \u00b7  {mode}  \u00b7  "
@@ -1170,10 +1190,16 @@ class ClickStormApp:
             slot_text = f"{batch} clicks every 1 ms slot"
         else:
             slot_text = f"1 click every {1000.0 / rate:,.2f} ms"
-        if rate >= 4_000:
+        if rate >= 5_000:
             text = (
-                f"{slot_text}. At the 5,000 CPS cap; Windows injects up to "
-                "about 6,000 CPS, so this rate is reachable."
+                f"{slot_text}. Near the 6,000 CPS ceiling; SENDINPUT can "
+                "deliver this, and DIRECT is faster still."
+            )
+            color = COLORS["amber"]
+        elif rate >= 4_000:
+            text = (
+                f"{slot_text}. Very fast; use SENDINPUT or DIRECT for the "
+                "highest delivered rate."
             )
             color = COLORS["amber"]
         elif rate > 2_000:
@@ -1699,6 +1725,11 @@ class ClickStormApp:
         self._update_gauge_idle()
         self._update_stats_display(stats, final=True)
 
+        if self._pending_engine_preference:
+            preference = self._pending_engine_preference
+            self._pending_engine_preference = ""
+            self._rebuild_engine(preference)
+
     # ------------------------------------------------------------------
     # Live updates / sampling
     # ------------------------------------------------------------------
@@ -2014,11 +2045,17 @@ class ClickStormApp:
             return
 
         self._settings_open = True
-        dialog = SettingsDialog(
-            self.root,
-            self.settings,
-            on_save=self._on_settings_saved,
-        )
+        try:
+            dialog = SettingsDialog(
+                self.root,
+                self.settings,
+                on_save=self._on_settings_saved,
+            )
+        except Exception:
+            # A dialog that failed to build must not latch the settings
+            # window closed for the rest of the session.
+            self._settings_open = False
+            raise
         self._settings_dialog = dialog
         dialog.bind(
             "<Destroy>",
@@ -2039,6 +2076,15 @@ class ClickStormApp:
         except Exception:
             pass
         self.settings = new_settings
+        preference = getattr(self.settings, "engine", "rust")
+        if preference != self._engine_preference:
+            if self._run_active or self.engine.is_running():
+                # The running session belongs to the old core. Swap when it
+                # finishes instead of pulling the click loop out from under
+                # an active run.
+                self._pending_engine_preference = preference
+            else:
+                self._rebuild_engine(preference)
         self.settings.cps = old_cps
         self.settings.window_geometry = geometry
         self._start_delay = self.settings.start_delay

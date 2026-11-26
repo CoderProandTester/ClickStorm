@@ -26,28 +26,34 @@
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub const ABI_VERSION: u32 = 1;
 
 const MIN_CPS: f64 = 1.0;
 // Windows injects SendInput events through one system input thread and lands
-// around 6,000-7,000 delivered CPS before the target becomes the limit, so the
-// app never offers more than 5,000.
-const MAX_CPS: f64 = 5_000.0;
+// around 6,000-7,000 delivered CPS before the target becomes the limit, so
+// 6,000 is the highest target the app offers and 5,000 sits inside it.
+const MAX_CPS: f64 = 6_000.0;
 const MAX_CLICKS: i64 = 25_000;
 const MAX_DURATION: f64 = 86_400.0;
 
-// SendInput hands every event to one system input thread. One call per
-// millisecond slot (5 clicks at 5,000 CPS, about 1,000 calls a second) keeps
-// per-call overhead off the hot path; SYNC deliberately stays at one click a
-// call, and posted-message delivery can use a much wider batch.
-const MAX_CHUNK_CLICKS: usize = 32;
+// SendInput has a fixed per-call cost that dwarfs the per-event cost, so a
+// call carries a time budget of clicks instead of one 1 ms slot: 4 ms at
+// 6,000 CPS is 24 clicks (48 events) in one call, about 250 calls a second
+// rather than 6,000 calls. SYNC starts at one click a call and widens to a
+// 2 ms budget once calls stay clean. Shrinking the batch when a call is slow
+// is what used to collapse delivery to one click a call (the 2,000 CPS cap).
+const MAX_CHUNK_CLICKS: usize = 64;
 const MIN_CHUNK_CLICKS: usize = 1;
-const CHUNK_SLOW: Duration = Duration::from_micros(800);
+const SENDINPUT_BATCH_SECONDS: f64 = 0.004;
+const SYNC_BATCH_SECONDS: f64 = 0.002;
+const SYNC_MAX_CLICKS: usize = 8;
+const CHUNK_GROW_BURSTS: u32 = 8;
 // Posted messages never touch the input queue, so the direct path can use a
-// wide batch per syscall.
-const DIRECT_CHUNK_CLICKS: usize = 256;
+// wider batch per syscall. 64 clicks is about 10 ms at 6,000 CPS, which keeps
+// STOP responsive while cutting the call count by an order of magnitude.
+const DIRECT_CHUNK_CLICKS: usize = 64;
 const MAX_BACKLOG_MS: f64 = 20.0;
 const MAX_CONSECUTIVE_FAILURES: u32 = 200;
 
@@ -516,6 +522,7 @@ fn run_session(inner: Arc<Inner>, cfg: Config) {
 mod platform {
     use super::*;
     use std::ffi::c_void;
+    use std::time::Duration;
 
     type Handle = *mut c_void;
     type Bool = i32;
@@ -627,7 +634,7 @@ mod platform {
     const THREAD_INFORMATION_CLASS_POWER_THROTTLING: i32 = 1;
     const THREAD_POWER_THROTTLING_CURRENT_VERSION: Uint = 1;
     const THREAD_POWER_THROTTLING_EXECUTION_SPEED: Uint = 0x1;
-    const YIELD_SECONDS: f64 = 0.002;
+    const YIELD_SECONDS: f64 = 0.0005;
     const SPIN_SECONDS: f64 = 0.000_050;
 
     pub fn run(inner: &Arc<Inner>, cfg: Config) -> Result<u32, String> {
@@ -636,8 +643,10 @@ mod platform {
 
             timeBeginPeriod(1);
             let thread = GetCurrentThread();
-            SetThreadPriority(thread, THREAD_PRIORITY_TIME_CRITICAL);
             if cfg.performance {
+                // Performance mode is the only path that raises priorities,
+                // matching the Python core and the settings toggle.
+                SetThreadPriority(thread, THREAD_PRIORITY_TIME_CRITICAL);
                 SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
                 let state = PowerThrottlingState {
                     version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
@@ -654,8 +663,8 @@ mod platform {
 
             let result = run_hot(inner, cfg, &timer);
 
+            SetThreadPriority(thread, THREAD_PRIORITY_NORMAL);
             if cfg.performance {
-                SetThreadPriority(thread, THREAD_PRIORITY_NORMAL);
                 SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
             }
             timeEndPeriod(1);
@@ -736,14 +745,16 @@ mod platform {
         }
 
         let use_send_input = delivery != Delivery::Direct;
-        let per_slot = ((cfg.cps / 1000.0).round() as usize).clamp(1, MAX_CHUNK_CLICKS);
+        let sendinput_batch = ((cfg.cps * SENDINPUT_BATCH_SECONDS).round() as usize)
+            .clamp(MIN_CHUNK_CLICKS, MAX_CHUNK_CLICKS);
         let (mut chunk, chunk_limit) = match delivery {
-            Delivery::Sync => (MIN_CHUNK_CLICKS, MIN_CHUNK_CLICKS),
-            Delivery::SendInput => (per_slot, per_slot),
-            Delivery::Direct => (
-                per_slot.min(DIRECT_CHUNK_CLICKS),
-                DIRECT_CHUNK_CLICKS,
+            Delivery::Sync => (
+                MIN_CHUNK_CLICKS,
+                ((cfg.cps * SYNC_BATCH_SECONDS).round() as usize)
+                    .clamp(MIN_CHUNK_CLICKS, SYNC_MAX_CLICKS),
             ),
+            Delivery::SendInput => (sendinput_batch, sendinput_batch),
+            Delivery::Direct => (sendinput_batch, DIRECT_CHUNK_CLICKS),
         };
 
         let cps = cfg.cps;
@@ -912,17 +923,19 @@ mod platform {
                 } else {
                     *lock(&inner.error) = detail;
                 }
-                if call_seconds < CHUNK_SLOW {
+                // Grow only while the call fitted inside the batch's own
+                // time budget. A slow call must never shrink the batch: that
+                // is what used to cap delivery near 2,000 CPS by collapsing
+                // to one click per SendInput call.
+                let budget = (chunk as f64 / cps).max(0.001);
+                if call_seconds.as_secs_f64() < budget {
                     clean_bursts += 1;
-                    if clean_bursts >= 16 && chunk < chunk_limit {
+                    if clean_bursts >= CHUNK_GROW_BURSTS && chunk < chunk_limit {
                         chunk = (chunk * 2).min(chunk_limit);
                         clean_bursts = 0;
                     }
                 } else {
                     clean_bursts = 0;
-                    if chunk > MIN_CHUNK_CLICKS {
-                        chunk = (chunk / 2).max(MIN_CHUNK_CLICKS);
-                    }
                 }
             } else {
                 failures += 1;

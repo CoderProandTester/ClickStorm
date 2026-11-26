@@ -419,7 +419,7 @@ class LogSlider(tk.Canvas):
         self,
         parent,
         minimum=1.0,
-        maximum=5_000.0,
+        maximum=6_000.0,
         value=500.0,
         command=None,
         bg=None,

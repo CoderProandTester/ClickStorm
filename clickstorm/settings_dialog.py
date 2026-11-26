@@ -46,6 +46,7 @@ class SettingsDialog(tk.Toplevel):
         self._closed = False
 
         self.delivery_var = tk.StringVar(value=settings.delivery)
+        self.engine_var = tk.StringVar(value=getattr(settings, "engine", "rust"))
         self.pin_window_var = tk.BooleanVar(value=settings.pin_window)
         self.position_var = tk.StringVar(value=settings.position_mode)
         self.hotkeys_enabled_var = tk.BooleanVar(value=settings.hotkeys_enabled)
@@ -210,6 +211,7 @@ class SettingsDialog(tk.Toplevel):
         right = tk.Frame(content, bg=COLORS["bg"])
         right.grid(row=0, column=1, sticky="nsew", padx=(9, 0))
 
+        self._build_engine(left)
         self._build_delivery(left)
         self._build_timing(left)
         self._build_position(left)
@@ -270,12 +272,42 @@ class SettingsDialog(tk.Toplevel):
             ).pack(anchor="w", pady=(2, 0))
         return inner
 
+    def _build_engine(self, parent):
+        inner = self._section(
+            parent,
+            "Engine",
+            "Rust is the default and the fastest core.",
+        )
+        self.engine_segment = theme.SegmentedControl(
+            inner,
+            options=(("rust", "RUST"), ("python", "PYTHON")),
+            variable=self.engine_var,
+            bg=COLORS["card"],
+            button_width=84,
+            button_height=32,
+            font_size=8,
+            gap=5,
+            accent=COLORS["accent"],
+        )
+        self.engine_segment.pack(anchor="w", pady=(9, 6))
+        theme.make_label(
+            inner,
+            "RUST runs the hot loop in clickstorm_engine.dll, with no "
+            "interpreter or garbage collector in the click path. It is the "
+            "fastest engine and falls back to Python automatically when the "
+            "DLL is missing or cannot start. PYTHON runs the same pacing and "
+            "delivery in the app process - useful for diagnosing the native "
+            "core or on a machine where the DLL is unavailable.",
+            size=8, color=COLORS["faint"], bg=COLORS["card"],
+            justify="left", wraplength=360,
+        ).pack(anchor="w")
+
     def _build_delivery(self, parent):
         inner = self._section(
             parent,
             "Delivery",
-            "SYNC is the default: every click is injected as a real mouse "
-            "event, so apps and games register it.",
+            "DIRECT is the default and the fastest: posted window messages "
+            "skip the system input queue.",
         )
         self.delivery_segment = theme.SegmentedControl(
             inner,
@@ -301,10 +333,12 @@ class SettingsDialog(tk.Toplevel):
         ).pack(anchor="w", pady=(0, 6))
         theme.make_label(
             inner,
-            "SYNC sends one click per call, the most compatible real input. "
-            "SENDINPUT batches a millisecond of clicks per call for maximum "
-            "delivered speed. DIRECT posts button messages instead: it can "
-            "click a covered window, but games and raw-input apps ignore it.",
+            "DIRECT posts button messages to the window under the cursor: it "
+            "is the fastest mode and can click a covered window, but games "
+            "and raw-input apps ignore it. SYNC and SENDINPUT inject real "
+            "mouse input instead: both batch several clicks per call, SYNC "
+            "starting at one click and widening while calls stay clean, "
+            "SENDINPUT filling a 4 ms budget for maximum delivered speed.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
             justify="left", wraplength=360,
         ).pack(anchor="w")
@@ -450,10 +484,9 @@ class SettingsDialog(tk.Toplevel):
         ).pack(anchor="w", pady=(4, 6))
         theme.make_label(
             inner,
-            "There is one engine: the native Rust core and the Python core "
-            "share the same pacing, delivery and limits. If the native DLL is "
-            "missing or cannot start a run, the Python core takes over "
-            "automatically, so there is nothing to choose here.",
+            "Both cores share the same pacing, batching, delivery and limits. "
+            "The ENGINE section picks which one runs the click loop; Rust is "
+            "the default.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
             justify="left", wraplength=360,
         ).pack(anchor="w")
@@ -512,7 +545,7 @@ class SettingsDialog(tk.Toplevel):
 
         theme.make_label(
             inner,
-            f"{APP_NAME} v{APP_VERSION}  |  one engine, Win32 per-click input",
+            f"{APP_NAME} v{APP_VERSION}  |  Rust + Python cores, Win32 input",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
         ).pack(anchor="w", pady=(6, 0))
         theme.make_label(
@@ -681,6 +714,7 @@ class SettingsDialog(tk.Toplevel):
         updated = replace(
             self._settings,
             delivery=self.delivery_var.get(),
+            engine=self.engine_var.get(),
             pin_window=bool(self.pin_window_var.get()),
             position_mode=self.position_var.get(),
             fixed_x=fixed_x,

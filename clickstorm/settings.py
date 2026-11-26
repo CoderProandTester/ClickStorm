@@ -17,7 +17,7 @@ from . import APP_DATA_DIR
 from .engine import MAX_CLICKS, MAX_CPS, MAX_DURATION, MIN_CPS
 from .winapi import BUTTONS, HOTKEY_KEYS
 
-SETTINGS_VERSION = 5
+SETTINGS_VERSION = 6
 _GEOMETRY_RE = re.compile(r"^\d+x\d+([+-]\d+[+-]\d+)?$")
 
 #: Why the last :meth:`Settings.save` call failed, for the UI to show. Empty
@@ -48,7 +48,8 @@ class Settings:
 
     start_delay: float = 2.0
     jitter_percent: float = 0.0
-    delivery: str = "sync"  # sync | auto | direct | sendinput
+    delivery: str = "direct"  # direct | sync | sendinput
+    engine: str = "rust"  # rust | python
     pin_window: bool = False
     position_mode: str = "cursor"
     fixed_x: int = 0
@@ -122,10 +123,11 @@ class Settings:
         out.start_delay = number("start_delay", 0.0, 10.0)
         out.jitter_percent = number("jitter_percent", 0.0, 0.75)
         # "auto" is no longer offered; an old AUTO value falls back to the
-        # SYNC default, which is what AUTO resolved to at these rates.
+        # DIRECT default, the fastest delivered path.
         out.delivery = choice(
-            "delivery", ("sendinput", "direct", "sync"), "sync"
+            "delivery", ("sendinput", "direct", "sync"), "direct"
         )
+        out.engine = choice("engine", ("rust", "python"), "rust")
         out.pin_window = boolean("pin_window")
         out.position_mode = choice(
             "position_mode", ("cursor", "fixed"), "cursor"
@@ -163,13 +165,20 @@ class Settings:
             out.hotkey_start = "F5"
             out.hotkey_stop = "F9"
         if raw_version < 4:
-            # Version 4 makes SYNC the default delivery. Only the untouched
+            # Version 4 made SYNC the default delivery. Only the untouched
             # old SENDINPUT default is upgraded, so an explicit Direct or
             # SendInput choice is preserved.
             if out.delivery == "sendinput":
                 out.delivery = "sync"
-        # Version 5 retires AUTO and caps the click rate at 5,000 CPS. The
-        # choice() above turns an old AUTO value into SYNC, and number()
+        if raw_version < 6:
+            # Version 6 makes DIRECT (the fastest path) the default delivery
+            # and adds the ENGINE setting. An old default SYNC becomes DIRECT;
+            # SENDINPUT and DIRECT choices are left alone. Rust is the engine
+            # default, so files without the key need no other change.
+            if out.delivery == "sync":
+                out.delivery = "direct"
+        # Version 5 retires AUTO and caps the click rate at the app maximum.
+        # The choice() above turns an old AUTO value into DIRECT, and number()
         # clamps a saved rate such as 25,000 down to the new maximum.
 
         if out.hotkey_start == out.hotkey_stop:
