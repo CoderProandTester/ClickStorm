@@ -31,6 +31,10 @@ concurrency:
 jobs:
   build:
     name: ${{ matrix.arch }}
+    # The delivered-CPS gate runs first and every installer build waits for it:
+    # if either core cannot deliver clicks there is nothing worth packaging, so
+    # no exe is built and no release is published.
+    needs: delivery
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     # The ARM64 runner is limited availability; a failed ARM64 leg must not
@@ -199,7 +203,7 @@ jobs:
     # Publish for a push to main, a v* tag push, or a manual run with
     # "publish" enabled. Always runs even when one build leg failed (that is
     # why the verify step below insists on at least one installer), but a
-    # failed delivery test blocks the release.
+    # failed delivery test skips the builds and blocks the release.
     if: |
       always() && !cancelled() && needs.delivery.result == 'success' &&
       (github.ref == 'refs/heads/main' ||

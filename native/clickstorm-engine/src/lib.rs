@@ -761,7 +761,13 @@ mod platform {
                 ((cfg.cps * SYNC_BATCH_SECONDS).round() as usize)
                     .clamp(MIN_CHUNK_CLICKS, SYNC_MAX_CLICKS),
             ),
-            Delivery::SendInput => (sendinput_batch, sendinput_batch),
+            // Opens at half the budget and doubles after a few clean calls:
+            // the full 72-event call is answered with a shortfall while a
+            // target's input queue is still filling.
+            Delivery::SendInput => (
+                (sendinput_batch / 2).max(MIN_CHUNK_CLICKS),
+                sendinput_batch,
+            ),
             Delivery::Direct => (sendinput_batch, DIRECT_CHUNK_CLICKS),
         };
 

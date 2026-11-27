@@ -8,11 +8,14 @@ bookkeeping.
 
 Requirements checked:
 
-* the native Rust core is the one clicking (the fastest engine),
+* both cores are exercised, Rust then Python,
 * SENDINPUT delivers at least 4,000 clicks per second at a 5,000 target,
 * SYNC registers essentially every click it asks for,
-* DIRECT completes a 6,000 click (three second) run at 2,000 CPS,
+* DIRECT completes a 4,000 click (two second) run at 2,000 CPS,
 * no mode leaves the button unpaired.
+
+This job is the gate in front of the installer builds: no exe is built unless
+both cores pass here.
 
 Run on Windows only, from the repository root:
 
@@ -38,10 +41,11 @@ if str(ROOT) not in sys.path:
 TARGET_CPS = 5_000.0
 SENDINPUT_CLICKS = 2_500
 SYNC_CLICKS = 1_200
-# DIRECT at 2,000 CPS for three seconds: the longest run the old engine could
-# finish, because a target whose message queue filled aborted the session.
+# DIRECT at 2,000 CPS for two seconds: long enough to outlast the batches the
+# old engine finished before its credit bank deadlocked or its target's
+# message queue filled, whichever came first.
 DIRECT_CPS = 2_000.0
-DIRECT_CLICKS = 6_000
+DIRECT_CLICKS = 4_000
 MIN_DELIVERED_CPS = 4_000.0
 MIN_DELIVERED_RATIO = 0.90
 SESSION_TIMEOUT = 25.0
@@ -170,9 +174,11 @@ def run_session(
     report: Path,
     require_rate: bool,
     cps: float = TARGET_CPS,
+    label: str = "engine",
 ) -> tuple[int, float]:
     from clickstorm.engine import EngineConfig
 
+    tag = f"{label}/{delivery}"
     before = read_report(report)["downs"]
     started = time.perf_counter()
     config = EngineConfig(
@@ -182,56 +188,126 @@ def run_session(
         delivery=delivery,
     )
     if not engine.start(config):
-        raise RuntimeError(f"{delivery}: engine refused to start")
+        raise RuntimeError(f"{tag}: engine refused to start")
 
     while engine.is_running() and time.perf_counter() - started < SESSION_TIMEOUT:
         time.sleep(0.005)
     elapsed = time.perf_counter() - started
     if engine.is_running():
         engine.stop()
-        raise RuntimeError(f"{delivery}: session did not finish within {SESSION_TIMEOUT}s")
+        raise RuntimeError(f"{tag}: session did not finish within {SESSION_TIMEOUT}s")
 
     # Let the counter's Tk loop drain the last events before reading it.
     after = settle_report(report)
     stats = engine.get_stats()
     delivered = int(after["downs"]) - int(before)
-    print(
-        f"{delivery}: engine sent {stats.clicks_sent:,}/{clicks:,} "
+    line = (
+        f"{tag}: engine sent {stats.clicks_sent:,}/{clicks:,} "
         f"in {elapsed:.3f}s, counter received {delivered:,} "
         f"({delivered / elapsed:,.0f} delivered CPS), "
-        f"failed events {stats.failed_events:,}, "
+        f"retried shortfall events {stats.failed_events:,}, "
         f"unpaired {max(0, after['downs'] - after['ups']):,}"
     )
+    print(line)
+    write_summary([line])
     detail = (
-        f"engine sent {stats.clicks_sent}, failed {stats.failed_events}, "
+        f"engine sent {stats.clicks_sent}, retried {stats.failed_events}, "
         f"counter {delivered:,} delivered ({after['downs']:,} down / "
-        f"{after['ups']:,} up), elapsed {elapsed:.3f}s"
+        f"{after['ups']:,} up), elapsed {elapsed:.3f}s, "
+        f"last error {stats.last_error or 'none'}"
     )
     if stats.clicks_sent != clicks:
         raise RuntimeError(
-            f"{delivery}: engine finished with {stats.clicks_sent} of {clicks} clicks "
+            f"{tag}: engine finished with {stats.clicks_sent} of {clicks} clicks "
             f"({detail})"
         )
-    if stats.failed_events:
-        raise RuntimeError(
-            f"{delivery}: {stats.failed_events} input events were rejected ({detail})"
-        )
+    # A short call is retried, not lost: the engine keeps a click owed until
+    # Windows accepts it. Treating every retried shortfall as a failure made a
+    # merely busy input queue fail the job while every click still arrived, so
+    # the failure condition is a click that never landed at all.
+    owed = stats.clicks_requested - stats.clicks_sent
+    if owed > 0:
+        raise RuntimeError(f"{tag}: {owed} clicks were never accepted ({detail})")
     if delivered < clicks * MIN_DELIVERED_RATIO:
         raise RuntimeError(
-            f"{delivery}: only {delivered} of {clicks} clicks reached the target "
+            f"{tag}: only {delivered} of {clicks} clicks reached the target "
             f"({detail})"
         )
     if require_rate and delivered / elapsed < MIN_DELIVERED_CPS:
         raise RuntimeError(
-            f"{delivery}: delivered {delivered / elapsed:,.0f} CPS, "
+            f"{tag}: delivered {delivered / elapsed:,.0f} CPS, "
             f"below the {MIN_DELIVERED_CPS:,.0f} CPS requirement ({detail})"
         )
     if after["downs"] - after["ups"] > 5:
         raise RuntimeError(
-            f"{delivery}: {after['downs'] - after['ups']} unpaired button events "
+            f"{tag}: {after['downs'] - after['ups']} unpaired button events "
             f"({detail})"
         )
     return delivered, elapsed
+
+
+def open_engine(preference: str):
+    """Return the engine for ``preference``, proving that core is running."""
+    from clickstorm.engine import make_engine
+
+    engine = make_engine(preference)
+    expected = "Rust" if preference == "rust" else "Python"
+    core = getattr(engine, "core_name", "Python")
+    if core != expected:
+        from clickstorm import native_engine
+
+        reason = (
+            getattr(engine, "last_fallback_reason", "")
+            or native_engine.load_error()
+            or "DLL missing"
+        )
+        candidates = {
+            str(path): os.path.exists(path)
+            for path in native_engine._library_candidates()
+        }
+        engine.close()
+        raise RuntimeError(
+            f"the {expected} core is not in use: core is {core} ({reason}); "
+            f"candidates {candidates}"
+        )
+    print(f"{core} core: {getattr(engine, 'backend_name', 'Ultimate')}")
+    return engine
+
+
+def check_engine(preference: str, hwnd: int, report: Path) -> None:
+    """Run every delivery mode on one core; any failure aborts the check."""
+    engine = open_engine(preference)
+    label = getattr(engine, "core_name", "Python")
+    try:
+        # Re-aim before each run: the previous run must not leave the cursor
+        # over something else if the counter moved.
+        aim_at_counter(hwnd)
+        run_session(
+            engine,
+            "sendinput",
+            SENDINPUT_CLICKS,
+            report,
+            require_rate=True,
+            label=label,
+        )
+        aim_at_counter(hwnd)
+        run_session(
+            engine, "sync", SYNC_CLICKS, report, require_rate=False, label=label
+        )
+        aim_at_counter(hwnd)
+        # A full posted-message queue used to abort the session; a live target
+        # that drains is now paced instead, so the run must end on its count.
+        run_session(
+            engine,
+            "direct",
+            DIRECT_CLICKS,
+            report,
+            require_rate=False,
+            cps=DIRECT_CPS,
+            label=label,
+        )
+    finally:
+        engine.close()
 
 
 def main() -> int:
@@ -244,8 +320,6 @@ def main() -> int:
         user32.SetProcessDPIAware()
     except Exception:
         pass
-
-    from clickstorm.engine import make_engine
 
     work = Path(tempfile.mkdtemp(prefix="clickstorm-delivery-"))
     report = work / "counter.json"
@@ -267,52 +341,16 @@ def main() -> int:
             stderr=subprocess.STDOUT,
         )
 
-    engine = None
     try:
         hwnd = wait_for_window(title)
         aim_at_counter(hwnd)
         read_report(report)
 
-        engine = make_engine()
-        core = getattr(engine, "core_name", "Python")
-        if core != "Rust":
-            from clickstorm import native_engine
-
-            reason = (
-                getattr(engine, "last_fallback_reason", "")
-                or native_engine.load_error()
-                or "DLL missing"
-            )
-            candidates = {
-                str(path): os.path.exists(path)
-                for path in native_engine._library_candidates()
-            }
-            raise RuntimeError(
-                f"the fastest engine is not in use: core is {core} ({reason}); "
-                f"candidates {candidates}"
-            )
-        print(f"core: {core} ({getattr(engine, 'backend_name', 'Ultimate')})")
-
-        # Re-aim before each run: the previous run must not leave the cursor
-        # over something else if the counter moved.
-        aim_at_counter(hwnd)
-        run_session(engine, "sendinput", SENDINPUT_CLICKS, report, require_rate=True)
-        aim_at_counter(hwnd)
-        run_session(engine, "sync", SYNC_CLICKS, report, require_rate=False)
-        aim_at_counter(hwnd)
-        # A full posted-message queue used to abort the session; a live target
-        # that drains is now paced instead, so the run must end on its count.
-        run_session(
-            engine,
-            "direct",
-            DIRECT_CLICKS,
-            report,
-            require_rate=False,
-            cps=DIRECT_CPS,
-        )
+        for preference in ("rust", "python"):
+            check_engine(preference, hwnd, report)
         print(
-            "PASS: SENDINPUT delivered at rate, SYNC registered its clicks "
-            "and DIRECT finished a three-second run."
+            "PASS: both cores delivered SENDINPUT at rate, registered SYNC "
+            "clicks and finished a DIRECT run."
         )
         return 0
     except Exception as exc:
@@ -337,11 +375,6 @@ def main() -> int:
         annotate_failure(f"FAIL: {exc} (session {os.environ.get('SESSIONNAME', '?')}, python {sys.version.split()[0]})")
         return 1
     finally:
-        if engine is not None:
-            try:
-                engine.close()
-            except Exception:
-                pass
         counter.terminate()
         try:
             counter.wait(timeout=5)

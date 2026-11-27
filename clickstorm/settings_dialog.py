@@ -338,8 +338,9 @@ class SettingsDialog(tk.Toplevel):
             "and raw-input apps ignore it. SYNC and SENDINPUT inject real "
             "mouse input instead, in the order they deliver: SYNC starts at "
             "one click per call and widens to 3 ms worth while calls stay "
-            "clean, SENDINPUT fills a 6 ms budget for the highest real-input "
-            "rate. A target whose queue fills is paced, not stopped.",
+            "clean, SENDINPUT ramps to a 6 ms budget for the highest "
+            "real-input rate. A target whose queue fills is paced, not "
+            "stopped.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
             justify="left", wraplength=360,
         ).pack(anchor="w")

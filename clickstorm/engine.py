@@ -26,10 +26,10 @@ SYNC and SENDINPUT both inject real mouse input with ``SendInput``, so every
 application and game registers them.  Both send a batch of clicks in one
 call, because SendInput charges far more for a call than for an event.  SYNC
 starts at one complete click per call and widens to three milliseconds of
-clicks once calls stay clean; SENDINPUT fills a six millisecond budget (36
-clicks at 6,000 CPS, about 167 calls a second instead of 6,000).  A slow call
-is never a reason to send fewer clicks -- that is what used to cap delivery
-near 2,000 CPS.
+clicks once calls stay clean; SENDINPUT ramps from half of a six millisecond
+budget to the full 36 clicks at 6,000 CPS (about 167 calls a second instead of
+6,000).  A slow call is never a reason to send fewer clicks -- that is what
+used to cap delivery near 2,000 CPS.
 
 Backpressure
 ------------
@@ -497,12 +497,15 @@ class ClickEngine:
                 )
                 chunk = MIN_CHUNK_CLICKS
             else:
-                # SENDINPUT starts at its full time budget: at 6,000 CPS that
-                # is 24 clicks (48 events) per call, about 250 calls a second
-                # instead of the 6,000 two-event calls the input thread
-                # cannot drain fast enough to reach the target rate.
+                # SENDINPUT ramps to its full time budget: at 6,000 CPS that
+                # is 36 clicks (72 events) per call, about 167 calls a second
+                # instead of the 6,000 two-event calls the input thread cannot
+                # drain fast enough to reach the target rate. It opens at half
+                # the budget because a target whose input queue is still
+                # filling answers the full 72-event call with a shortfall;
+                # four clean calls double it to the full budget.
                 chunk_limit = sendinput_batch
-                chunk = sendinput_batch
+                chunk = max(MIN_CHUNK_CLICKS, chunk_limit // 2)
         else:
             # Posted messages skip the input queue, so direct delivery starts
             # at the full time budget as well.

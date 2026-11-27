@@ -67,10 +67,11 @@ with Start-menu shortcuts and an entry in Settings → Apps.
   repaid instead of losing clicks.
 - Batched `SendInput`: both real-input modes carry a time budget of clicks
   per call instead of one click, because a call costs far more than an event.
-  SENDINPUT fills 6 ms per call (36 clicks at 6,000 CPS, about 167 calls a
-  second) and SYNC starts at one click per call then ramps to 3 ms worth (16
-  clicks) as the target keeps up. A partly accepted call is sized to what the
-  target took instead of being halved, and the rest is retried immediately.
+  SENDINPUT opens at half of a 6 ms budget (36 clicks at 6,000 CPS, about 167
+  calls a second) and doubles to the full budget while calls stay clean; SYNC
+  starts at one click per call then ramps to 3 ms worth (16 clicks). A partly
+  accepted call is sized to what the target took instead of being halved, and
+  the rest is retried immediately.
 - **A busy target is paced, not stopped.** A short call (a full input queue, a
   full posted-message queue) keeps the click owed and backs off for at most a
   millisecond, so delivery settles at the rate the target really drains. Only
@@ -325,8 +326,9 @@ Version 4.6.3 replaced the one-millisecond-slot batching with a time budget
 per call and stopped shrinking the batch when a call was slow. The old
 shrink-on-slow rule drove the batch down to a single click per `SendInput`
 call, which is what capped SENDINPUT near 2,000 delivered CPS on a fast
-target. SENDINPUT now fills 6 ms per call and SYNC ramps from one click to a
-3 ms budget, so both modes reach the rate the input thread can carry. The
+target. SENDINPUT now ramps from half of a 6 ms budget to the full 6 ms and
+SYNC ramps from one click to a 3 ms budget, so both modes reach the rate the
+input thread can carry. The
 engine ceiling is 6,000 CPS; DIRECT remains the fastest mode because posted
 messages never enter the input queue.
 
@@ -389,8 +391,8 @@ messages.
 mouse input exactly like a physical mouse. SYNC starts with one complete
 DOWN/UP pair in each call, the most compatible form, then ramps the batch to
 3 ms worth (16 clicks) while the target keeps up; use it when a game or app
-misses clicks. SENDINPUT fills a 6 ms budget per call for the highest rate
-these modes can carry. Neither mode needs a window under the cursor: they
+misses clicks. SENDINPUT ramps from half of a 6 ms budget to the full budget
+for the highest rate these modes can carry. Neither mode needs a window under the cursor: they
 click wherever the pointer is. Delivered order is **DIRECT, then SYNC, then
 SENDINPUT**: SYNC starts from the smallest, most compatible batch and widens
 quickly, while SENDINPUT opens with its largest batch and has to narrow it

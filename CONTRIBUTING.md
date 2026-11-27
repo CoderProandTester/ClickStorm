@@ -66,11 +66,13 @@ properties when changing it:
 - **Never click on the UI thread.** Tk is only touched from the main thread;
   the worker communicates through `poll_events()` and `get_stats()`.
 - **A `SendInput` call carries a time budget, not one click.** SENDINPUT
-  sends `round(cps * 0.006)` clicks per call (36 at 6,000 CPS), about 167
-  calls a second; SYNC starts at one click per call and ramps to
-  `round(cps * 0.003)` clicks (capped at 16) once calls stay clean. Never
-  shrink the batch because a call was slow: that collapse to one click per
-  call is what used to cap SENDINPUT near 2,000 delivered CPS.
+  opens at half of `round(cps * 0.006)` clicks per call and doubles to that
+  budget (36 clicks at 6,000 CPS, about 167 calls a second) while calls stay
+  clean; SYNC starts at one click per call and ramps to `round(cps * 0.003)`
+  clicks (capped at 16). Never shrink the batch because a call was slow: that
+  collapse to one click per call is what used to cap SENDINPUT near 2,000
+  delivered CPS. Never grow a batch past the 20 ms credit bank either, or the
+  wait for a whole batch can never be satisfied and the run freezes.
 - **A short call is backpressure, not failure.** When the OS or the target
   accepts only part of a batch, set the next batch to exactly what was
   accepted, keep the remainder owed and retry it immediately. Halving on every
