@@ -66,20 +66,27 @@ properties when changing it:
 - **Never click on the UI thread.** Tk is only touched from the main thread;
   the worker communicates through `poll_events()` and `get_stats()`.
 - **A `SendInput` call carries a time budget, not one click.** SENDINPUT
-  sends `round(cps * 0.004)` clicks per call (24 at 6,000 CPS), about 250
+  sends `round(cps * 0.006)` clicks per call (36 at 6,000 CPS), about 167
   calls a second; SYNC starts at one click per call and ramps to
-  `round(cps * 0.002)` clicks (capped at 8) once calls stay clean. Never
+  `round(cps * 0.003)` clicks (capped at 16) once calls stay clean. Never
   shrink the batch because a call was slow: that collapse to one click per
-  call is what used to cap SENDINPUT near 2,000 delivered CPS. Shrink only
-  when Windows rejects events.
+  call is what used to cap SENDINPUT near 2,000 delivered CPS.
+- **A short call is backpressure, not failure.** When the OS or the target
+  accepts only part of a batch, set the next batch to exactly what was
+  accepted, keep the remainder owed and retry it immediately. Halving on every
+  short call sawtoothed SENDINPUT down to a few hundred CPS. Only a call that
+  gets nothing at all backs off (0.1-1 ms), and only `STALL_SECONDS` with no
+  accepted click ends the run. Never end a session because a queue is full.
 - **SYNC and SENDINPUT must always use real input.** They call `SendInput`, so
   every app and game registers the clicks. Never route them through window
   messages: raw-input apps silently ignore `WM_*BUTTON*`, which is why the old
   message-based SYNC was replaced in 4.6.1.
 - **Message delivery is DIRECT only, and it must never hang the clicker.**
   DIRECT posts `WM_*BUTTON*` with `PostMessage`; it is asynchronous and a
-  target that falls behind can drop messages. A down that posts without its up
-  must retry the release so the button is never latched.
+  window's posted-message queue is capped at 10,000 messages. A full queue is
+  normal backpressure: pace to what `PostMessage` accepts and keep going. A
+  down that posts without its up must retry the release so the button is never
+  latched.
 - **The native fallback is a safety net, not a retry loop.** A native session
   that refuses to start, or errors before delivering any click, restarts once
   on the Python core under the same session id. An error after real work is
@@ -121,9 +128,14 @@ Run before opening a pull request:
 
 ```bat
 python -m compileall -q clickstorm clickstorm.py gauntlet.py tools\click_counter.py
+python tools\backpressure_check.py
 cargo test --manifest-path native\clickstorm-engine\Cargo.toml
 cargo check --manifest-path native\clickstorm-engine\Cargo.toml --target x86_64-pc-windows-msvc
 ```
+
+`tools\backpressure_check.py` needs no Windows and no display: it stubs the two
+Win32 queues, models a target that drains slowly and proves that a saturated
+queue is paced instead of aborting the run.
 
 The second cargo command type-checks the real Windows implementation (the host
 build only compiles the non-Windows stub). CI builds
@@ -139,8 +151,8 @@ Then check the behaviour you touched manually:
   rates; 6,000 is the cap.
 - For delivery or batching changes, run
   `python tools/ci_delivery_check.py` on Windows. It loads the native core,
-  starts `tools/click_counter.py`, and verifies the delivered SENDINPUT rate
-  plus SYNC click registration.
+  starts `tools/click_counter.py`, and verifies the delivered SENDINPUT rate,
+  SYNC click registration and a three-second DIRECT run at 2,000 CPS.
 - Verify follow-cursor and fixed-point modes.
 - Confirm the app keeps its icon, DPI scaling and saved window geometry.
 

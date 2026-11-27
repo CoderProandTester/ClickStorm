@@ -1090,7 +1090,7 @@ class ClickStormApp:
     def _refresh_engine_strip(self) -> None:
         delivery = {
             "sync": "SendInput, ramped batches",
-            "sendinput": "SendInput, 4 ms batches",
+            "sendinput": "SendInput, 6 ms batches",
             "direct": "Direct posted messages (fastest)",
         }.get(self.settings.delivery, "Direct posted messages (fastest)")
         position = (

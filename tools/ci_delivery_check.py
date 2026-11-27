@@ -11,7 +11,8 @@ Requirements checked:
 * the native Rust core is the one clicking (the fastest engine),
 * SENDINPUT delivers at least 4,000 clicks per second at a 5,000 target,
 * SYNC registers essentially every click it asks for,
-* neither mode leaves the button unpaired.
+* DIRECT completes a 6,000 click (three second) run at 2,000 CPS,
+* no mode leaves the button unpaired.
 
 Run on Windows only, from the repository root:
 
@@ -37,6 +38,10 @@ if str(ROOT) not in sys.path:
 TARGET_CPS = 5_000.0
 SENDINPUT_CLICKS = 2_500
 SYNC_CLICKS = 1_200
+# DIRECT at 2,000 CPS for three seconds: the longest run the old engine could
+# finish, because a target whose message queue filled aborted the session.
+DIRECT_CPS = 2_000.0
+DIRECT_CLICKS = 6_000
 MIN_DELIVERED_CPS = 4_000.0
 MIN_DELIVERED_RATIO = 0.90
 SESSION_TIMEOUT = 25.0
@@ -164,13 +169,14 @@ def run_session(
     clicks: int,
     report: Path,
     require_rate: bool,
+    cps: float = TARGET_CPS,
 ) -> tuple[int, float]:
     from clickstorm.engine import EngineConfig
 
     before = read_report(report)["downs"]
     started = time.perf_counter()
     config = EngineConfig(
-        cps=TARGET_CPS,
+        cps=cps,
         limit_mode="clicks",
         click_limit=clicks,
         delivery=delivery,
@@ -293,7 +299,21 @@ def main() -> int:
         run_session(engine, "sendinput", SENDINPUT_CLICKS, report, require_rate=True)
         aim_at_counter(hwnd)
         run_session(engine, "sync", SYNC_CLICKS, report, require_rate=False)
-        print("PASS: SENDINPUT delivered at rate and SYNC registered its clicks.")
+        aim_at_counter(hwnd)
+        # A full posted-message queue used to abort the session; a live target
+        # that drains is now paced instead, so the run must end on its count.
+        run_session(
+            engine,
+            "direct",
+            DIRECT_CLICKS,
+            report,
+            require_rate=False,
+            cps=DIRECT_CPS,
+        )
+        print(
+            "PASS: SENDINPUT delivered at rate, SYNC registered its clicks "
+            "and DIRECT finished a three-second run."
+        )
         return 0
     except Exception as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

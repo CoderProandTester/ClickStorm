@@ -39,23 +39,31 @@ const MAX_CLICKS: i64 = 25_000;
 const MAX_DURATION: f64 = 86_400.0;
 
 // SendInput has a fixed per-call cost that dwarfs the per-event cost, so a
-// call carries a time budget of clicks instead of one 1 ms slot: 4 ms at
-// 6,000 CPS is 24 clicks (48 events) in one call, about 250 calls a second
+// call carries a time budget of clicks instead of one 1 ms slot: 6 ms at
+// 6,000 CPS is 36 clicks (72 events) in one call, about 167 calls a second
 // rather than 6,000 calls. SYNC starts at one click a call and widens to a
-// 2 ms budget once calls stay clean. Shrinking the batch when a call is slow
-// is what used to collapse delivery to one click a call (the 2,000 CPS cap).
+// 3 ms budget (16 clicks) once calls stay clean. Shrinking the batch when a
+// call is slow is what used to collapse delivery to one click a call (the
+// 2,000 CPS cap).
 const MAX_CHUNK_CLICKS: usize = 64;
 const MIN_CHUNK_CLICKS: usize = 1;
-const SENDINPUT_BATCH_SECONDS: f64 = 0.004;
-const SYNC_BATCH_SECONDS: f64 = 0.002;
-const SYNC_MAX_CLICKS: usize = 8;
-const CHUNK_GROW_BURSTS: u32 = 8;
+const SENDINPUT_BATCH_SECONDS: f64 = 0.006;
+const SYNC_BATCH_SECONDS: f64 = 0.003;
+const SYNC_MAX_CLICKS: usize = 16;
+const CHUNK_GROW_BURSTS: u32 = 4;
 // Posted messages never touch the input queue, so the direct path can use a
 // wider batch per syscall. 64 clicks is about 10 ms at 6,000 CPS, which keeps
 // STOP responsive while cutting the call count by an order of magnitude.
 const DIRECT_CHUNK_CLICKS: usize = 64;
 const MAX_BACKLOG_MS: f64 = 20.0;
-const MAX_CONSECUTIVE_FAILURES: u32 = 200;
+// A target that is merely busy is not a failure. SendInput inserts only the
+// events that fit in the system input queue and PostMessage fails once a
+// window's 10,000-message queue is full, so a shortfall stays owed and the
+// loop backs off instead of ending the run. Only a session where nothing at
+// all was accepted for this long is reported as an error.
+const STALL_SECONDS: f64 = 2.0;
+const BACKOFF_MIN_MICROS: u64 = 100;
+const BACKOFF_MAX_MICROS: u64 = 1_000;
 
 const STARTUP_UNSET: u64 = u64::MAX;
 
@@ -171,7 +179,7 @@ impl Button {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Delivery {
-    /// Batched real input: one millisecond slot of clicks per call.
+    /// Batched real input: a time budget of clicks per call.
     SendInput,
     /// Posted `WM_*BUTTON*` messages: fast, but only classic Win32 windows
     /// that act on them register the clicks.
@@ -747,7 +755,7 @@ mod platform {
         let use_send_input = delivery != Delivery::Direct;
         let sendinput_batch = ((cfg.cps * SENDINPUT_BATCH_SECONDS).round() as usize)
             .clamp(MIN_CHUNK_CLICKS, MAX_CHUNK_CLICKS);
-        let (mut chunk, chunk_limit) = match delivery {
+        let (mut chunk, mut chunk_limit) = match delivery {
             Delivery::Sync => (
                 MIN_CHUNK_CLICKS,
                 ((cfg.cps * SYNC_BATCH_SECONDS).round() as usize)
@@ -759,9 +767,20 @@ mod platform {
 
         let cps = cfg.cps;
         let backlog_cap = (cps / 1000.0 * MAX_BACKLOG_MS).max(1.0);
+        // A batch can never be bigger than the credit bank. Credit is capped
+        // at backlog_cap, so waiting for a larger batch waits for clicks the
+        // cap refuses to accumulate: the loop sleeps forever while it still
+        // reports RUNNING. That is what froze low and medium rate runs a few
+        // seconds in, after the batch had doubled past the cap (64 clicks
+        // against a 40-click bank at 2,000 CPS).
+        chunk_limit = chunk_limit
+            .max(MIN_CHUNK_CLICKS)
+            .min((backlog_cap as usize).max(MIN_CHUNK_CLICKS));
+        chunk = chunk.clamp(MIN_CHUNK_CLICKS, chunk_limit);
         let mut credit = 0.0_f64;
         let mut rng: u64 = 0x9E37_79B9_7F4A_7C15 ^ now_ns();
-        let mut failures = 0_u32;
+        let mut zero_streak = 0_u32;
+        let mut stall_started: Option<Instant> = None;
         let mut clean_bursts = 0_u32;
         let mut last = Instant::now();
         let start = last;
@@ -856,16 +875,21 @@ mod platform {
             if use_send_input {
                 let events = (due as usize) * 2;
                 let sent = SendInput(events as Uint, input_array.as_ptr(), std::mem::size_of::<Input>() as i32);
-                accepted = (sent / 2) as i64;
+                if sent % 2 != 0 {
+                    // The dangling DOWN is completed by this release, so the
+                    // click counts: rounding it down re-sent a click the
+                    // target had already seen and cost a second call.
+                    SendInput(1, &release, std::mem::size_of::<Input>() as i32);
+                    accepted = ((sent + 1) / 2) as i64;
+                } else {
+                    accepted = (sent / 2) as i64;
+                }
                 if accepted > due {
                     accepted = due;
                 }
-                if sent % 2 != 0 {
-                    SendInput(1, &release, std::mem::size_of::<Input>() as i32);
-                }
                 if accepted < due {
-                    detail = "Windows rejected injected input. If the target is running \
-                              elevated, run ClickStorm as administrator."
+                    detail = "Windows is not accepting injected input. If the target is \
+                              running elevated, run ClickStorm as administrator."
                         .to_string();
                 }
             } else {
@@ -892,8 +916,9 @@ mod platform {
                             Some(t) => {
                                 accepted = post_clicks(t, due);
                                 if accepted < due {
-                                    detail = "The target window rejected some posted \
-                                              clicks. Try SYNC delivery instead."
+                                    detail = "The target window's message queue is full - it is \
+                                              not processing posted clicks fast enough. Use \
+                                              SENDINPUT or SYNC delivery for this target."
                                         .to_string();
                                 }
                             }
@@ -917,19 +942,16 @@ mod platform {
             }
 
             if accepted >= due {
-                failures = 0;
-                if detail.is_empty() {
-                    *lock(&inner.error) = String::new();
-                } else {
-                    *lock(&inner.error) = detail;
-                }
-                // Grow only while the call fitted inside the batch's own
-                // time budget. A slow call must never shrink the batch: that
-                // is what used to cap delivery near 2,000 CPS by collapsing
-                // to one click per SendInput call.
+                clean_bursts += 1;
+                zero_streak = 0;
+                stall_started = None;
+                // A clean batch clears a message left by a shortfall.
+                *lock(&inner.error) = String::new();
+                // Grow only while the call fitted inside the batch's own time
+                // budget. A slow call must never shrink the batch: that is
+                // what used to cap delivery near 2,000 CPS.
                 let budget = (chunk as f64 / cps).max(0.001);
                 if call_seconds.as_secs_f64() < budget {
-                    clean_bursts += 1;
                     if clean_bursts >= CHUNK_GROW_BURSTS && chunk < chunk_limit {
                         chunk = (chunk * 2).min(chunk_limit);
                         clean_bursts = 0;
@@ -937,29 +959,49 @@ mod platform {
                 } else {
                     clean_bursts = 0;
                 }
-            } else {
-                failures += 1;
-                clean_bursts = 0;
-                if chunk > MIN_CHUNK_CLICKS {
-                    chunk = (chunk / 2).max(MIN_CHUNK_CLICKS);
-                }
-                if !detail.is_empty() {
-                    *lock(&inner.error) = detail.clone();
-                }
-                if accepted == 0 {
-                    if failures >= MAX_CONSECUTIVE_FAILURES {
-                        return Err(if detail.is_empty() {
-                            "Windows rejected every injected click.".to_string()
-                        } else {
-                            detail
-                        });
-                    }
-                    SwitchToThread();
-                    if failures > 4 {
-                        thread::sleep(Duration::from_micros(250));
-                    }
-                }
+                continue;
             }
+
+            clean_bursts = 0;
+            if accepted > 0 {
+                // Partial call: the queue only had room for this many clicks.
+                // Carry exactly that many next time instead of halving on
+                // every shortfall - the sawtooth that starved SENDINPUT down
+                // to a few hundred CPS. The remainder is still owed, so the
+                // next turn sends it immediately.
+                chunk = (accepted as usize).clamp(MIN_CHUNK_CLICKS, chunk_limit);
+                zero_streak = 0;
+                stall_started = None;
+                *lock(&inner.error) = String::new();
+                continue;
+            }
+
+            // Nothing got through at all: the queue is full, input is
+            // blocked, or the target stopped pumping messages.
+            zero_streak += 1;
+            if chunk > MIN_CHUNK_CLICKS {
+                chunk = (chunk / 2).max(MIN_CHUNK_CLICKS);
+            }
+            let message = if detail.is_empty() {
+                "Windows rejected every injected click.".to_string()
+            } else {
+                detail
+            };
+            *lock(&inner.error) = message.clone();
+            let now_call = Instant::now();
+            let started = stall_started.unwrap_or(now_call);
+            stall_started = Some(started);
+            if now_call.duration_since(started).as_secs_f64() >= STALL_SECONDS {
+                return Err(format!(
+                    "{message} Nothing has been accepted for {STALL_SECONDS:.0} s, so the run was stopped."
+                ));
+            }
+            // Back off instead of spinning: 0.1 ms doubling to 1 ms, so a
+            // freed queue slot is picked up within a millisecond.
+            let shift = zero_streak.min(5) as u32;
+            thread::sleep(Duration::from_micros(
+                (BACKOFF_MIN_MICROS << shift).min(BACKOFF_MAX_MICROS),
+            ));
         }
     }
 

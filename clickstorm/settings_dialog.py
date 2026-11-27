@@ -333,12 +333,13 @@ class SettingsDialog(tk.Toplevel):
         ).pack(anchor="w", pady=(0, 6))
         theme.make_label(
             inner,
-            "DIRECT posts button messages to the window under the cursor: it "
-            "is the fastest mode and can click a covered window, but games "
+            "DIRECT posts button messages to the window under the cursor and "
+            "is the fastest mode: it can click a covered window, but games "
             "and raw-input apps ignore it. SYNC and SENDINPUT inject real "
-            "mouse input instead: both batch several clicks per call, SYNC "
-            "starting at one click and widening while calls stay clean, "
-            "SENDINPUT filling a 4 ms budget for maximum delivered speed.",
+            "mouse input instead, in the order they deliver: SYNC starts at "
+            "one click per call and widens to 3 ms worth while calls stay "
+            "clean, SENDINPUT fills a 6 ms budget for the highest real-input "
+            "rate. A target whose queue fills is paced, not stopped.",
             size=8, color=COLORS["faint"], bg=COLORS["card"],
             justify="left", wraplength=360,
         ).pack(anchor="w")

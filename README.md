@@ -67,9 +67,15 @@ with Start-menu shortcuts and an entry in Settings → Apps.
   repaid instead of losing clicks.
 - Batched `SendInput`: both real-input modes carry a time budget of clicks
   per call instead of one click, because a call costs far more than an event.
-  SENDINPUT fills 4 ms per call (24 clicks at 6,000 CPS, about 250 calls a
-  second) and SYNC starts at one click per call then ramps to 2 ms worth as
-  the target keeps up.
+  SENDINPUT fills 6 ms per call (36 clicks at 6,000 CPS, about 167 calls a
+  second) and SYNC starts at one click per call then ramps to 3 ms worth (16
+  clicks) as the target keeps up. A partly accepted call is sized to what the
+  target took instead of being halved, and the rest is retried immediately.
+- **A busy target is paced, not stopped.** A short call (a full input queue, a
+  full posted-message queue) keeps the click owed and backs off for at most a
+  millisecond, so delivery settles at the rate the target really drains. Only
+  a run where nothing at all is accepted for two seconds ends, with a message
+  naming the queue and the mode to use instead.
 - Three delivery modes, defaulting to **DIRECT**, the fastest mode. **DIRECT**
   posts `WM_*BUTTON*` messages to the window under the cursor: it skips the
   system input queue, can click a covered window, but games and raw-input apps
@@ -247,12 +253,21 @@ limit expires, or when you press stop. In unlimited mode only stop ends a run.
 - **Batched `SendInput` calls.** The `INPUT` array is built once per session
   and reused, so the hot loop never allocates. Both real-input modes carry a
   time budget of clicks per call, because a call has a fixed cost that dwarfs
-  the per-event cost: SENDINPUT fills 4 ms (24 clicks, 48 events, at 6,000 CPS
-  - about 250 calls a second instead of 6,000), and SYNC starts at one click
-  per call then ramps to 2 ms worth while the target keeps up. Only a
-  rejected call narrows the batch; a slow call does not, because shrinking on
-  a slow call drove the batch to one click per call and capped delivery near
-  2,000 CPS.
+  the per-event cost: SENDINPUT fills 6 ms (36 clicks, 72 events, at 6,000 CPS
+  - about 167 calls a second instead of 6,000), and SYNC starts at one click
+  per call then ramps to 3 ms worth (16 clicks) while the target keeps up. A
+  slow call never narrows the batch, because shrinking on a slow call drove
+  the batch to one click per call and capped delivery near 2,000 CPS.
+- **Backpressure, not an abort.** Windows caps a window's posted-message
+  queue at 10,000 messages and inserts only the `SendInput` events that fit in
+  the input queue, so a target that cannot keep up answers a batch with fewer
+  clicks than it carried. Those clicks stay owed: the next call carries
+  exactly what the target accepted, the rest follows immediately, and a call
+  that gets nothing at all backs off for 0.1-1 ms. Delivery therefore settles
+  at the target's real drain rate and the run keeps going. Before 4.6.4 two
+  hundred refused calls in a row (about 50 ms) ended the session, which is why
+  a 2,000 CPS DIRECT run against a full message queue stopped after a few
+  seconds instead of continuing.
 - **A higher-priority process.** While a session runs, both the click thread
   and the process class are raised so the click stream is not preempted by
   background work, then both are restored when the run ends.
@@ -310,10 +325,22 @@ Version 4.6.3 replaced the one-millisecond-slot batching with a time budget
 per call and stopped shrinking the batch when a call was slow. The old
 shrink-on-slow rule drove the batch down to a single click per `SendInput`
 call, which is what capped SENDINPUT near 2,000 delivered CPS on a fast
-target. SENDINPUT now fills 4 ms per call and SYNC ramps from one click to a
-2 ms budget, so both modes reach the rate the input thread can carry. The
+target. SENDINPUT now fills 6 ms per call and SYNC ramps from one click to a
+3 ms budget, so both modes reach the rate the input thread can carry. The
 engine ceiling is 6,000 CPS; DIRECT remains the fastest mode because posted
 messages never enter the input queue.
+
+Version 4.6.4 fixed the two ways batching lost clicks on a busy target. A
+partly accepted call used to halve the batch, so a congested input queue
+sawtoothed SENDINPUT down to one click per call and it read only a few
+hundred CPS; the batch now becomes exactly what the target accepted and the
+remainder is retried in the same turn. A refused call also used to count
+towards a fifty-millisecond abort, which is why a 2,000 CPS DIRECT run
+stopped after a couple of seconds with the target's message queue full; a
+queue that is merely full is now backpressure, and only two seconds with no
+accepted click at all ends a run. The delivered order is **DIRECT, then
+SYNC, then SENDINPUT**: posted messages skip the input queue, while both
+`SendInput` modes wait behind the same system input thread.
 
 ### What "5,000 CPS" can and cannot mean
 
@@ -361,10 +388,13 @@ messages.
 **SYNC** and **SENDINPUT** both use `SendInput`, so the target receives real
 mouse input exactly like a physical mouse. SYNC starts with one complete
 DOWN/UP pair in each call, the most compatible form, then ramps the batch to
-2 ms worth while the target keeps up; use it when a game or app misses
-clicks. SENDINPUT fills a 4 ms budget per call for maximum delivered speed at
-high rates. Neither mode needs a window under the cursor: they click wherever
-the pointer is.
+3 ms worth (16 clicks) while the target keeps up; use it when a game or app
+misses clicks. SENDINPUT fills a 6 ms budget per call for the highest rate
+these modes can carry. Neither mode needs a window under the cursor: they
+click wherever the pointer is. Delivered order is **DIRECT, then SYNC, then
+SENDINPUT**: SYNC starts from the smallest, most compatible batch and widens
+quickly, while SENDINPUT opens with its largest batch and has to narrow it
+when a target's input queue is congested.
 
 ### Why more threads do not help
 

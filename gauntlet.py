@@ -152,7 +152,7 @@ THREAD_PRIORITY_ABOVE_NORMAL = 1
 VK_F6 = 0x75
 VK_ESCAPE = 0x1B
 
-__version__ = "4.6.3"  # keep in sync with clickstorm/__init__.py
+__version__ = "4.6.4"  # keep in sync with clickstorm/__init__.py
 
 DEFAULT_CPS = 5_000.0
 MAX_CPS = 6_000.0
@@ -170,9 +170,11 @@ SPIN_SECONDS = 0.0003
 # threshold waits on the arm event instead of spinning for seconds (still
 # interruptible by F6/ESC).
 LONG_WAIT_SECONDS = 0.004
-# Give up on a target that refuses every event for this many batches in a row
-# instead of spinning on a dead input queue.
-MAX_CONSECUTIVE_FAILURES = 200
+# A full input queue is backpressure, not a dead target: the batch stays owed
+# and is retried. Only a session where nothing at all was accepted for this
+# long is reported as an error.
+STALL_SECONDS = 2.0
+BACKOFF_SECONDS = 0.0005
 
 BUTTONS = {
     "left": (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
@@ -318,8 +320,9 @@ class Gauntlet:
     def _hot_loop(self) -> None:
         """The Gauntlet Loop.
 
-        No allocations, no list operations, no prints and no sleeps: one
-        pre-built batch per kernel transition, a counter, and a deadline.
+        No allocations, no list operations and no prints: one pre-built batch
+        per kernel transition, a counter and a deadline. The only sleep is the
+        short back-off while the input queue refuses a whole batch.
         """
         send = SendInput
         batch_array = self._batch_array
@@ -333,7 +336,7 @@ class Gauntlet:
         batch_size = self.batch
 
         deadline = 0.0
-        failures = 0
+        stall_since = 0.0
         clicks = 0
 
         while not self._stop_flag:
@@ -358,21 +361,26 @@ class Gauntlet:
             if accepted < batch_size:
                 self._failed = self._failed + (batch_size - accepted)
                 if accepted == 0:
-                    failures += 1
-                    if failures >= MAX_CONSECUTIVE_FAILURES:
+                    now = perf()
+                    if stall_since == 0.0:
+                        stall_since = now
+                    elif now - stall_since >= STALL_SECONDS:
                         self._error = (
                             "Windows rejected every click for "
-                            f"{MAX_CONSECUTIVE_FAILURES} batches. If the "
-                            "target runs elevated, start this script from an "
+                            f"{STALL_SECONDS:.0f} s. If the target runs "
+                            "elevated, start this script from an "
                             "Administrator terminal."
                         )
                         self._armed_flag = False
                         self._armed_event.clear()
-                        failures = 0
+                        stall_since = 0.0
+                    # A saturated queue is polled, not spun: the batch is
+                    # still owed and goes out as soon as a slot frees up.
+                    time.sleep(BACKOFF_SECONDS)
                 else:
-                    failures = 0
+                    stall_since = 0.0
             else:
-                failures = 0
+                stall_since = 0.0
 
             if interval > 0.0:
                 if deadline <= 0.0:

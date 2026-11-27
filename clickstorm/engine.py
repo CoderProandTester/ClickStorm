@@ -25,11 +25,22 @@ Delivery
 SYNC and SENDINPUT both inject real mouse input with ``SendInput``, so every
 application and game registers them.  Both send a batch of clicks in one
 call, because SendInput charges far more for a call than for an event.  SYNC
-starts at one complete click per call and widens to a couple of milliseconds
-of clicks once calls stay clean; SENDINPUT fills a four millisecond budget
-(24 clicks at 6,000 CPS, about 250 calls a second instead of 6,000).  Only a
-rejected call narrows the batch again -- a slow call is not a reason to send
-fewer clicks, because that is what used to cap delivery near 2,000 CPS.
+starts at one complete click per call and widens to three milliseconds of
+clicks once calls stay clean; SENDINPUT fills a six millisecond budget (36
+clicks at 6,000 CPS, about 167 calls a second instead of 6,000).  A slow call
+is never a reason to send fewer clicks -- that is what used to cap delivery
+near 2,000 CPS.
+
+Backpressure
+------------
+A busy target is not a failure.  ``SendInput`` inserts only the events that
+fit in the system input queue and ``PostMessage`` fails once a window's 10,000
+message queue is full, so both paths see shortfalls while the target catches
+up.  The shortfall stays owed, the batch is narrowed to exactly what the
+target accepted, and the loop backs off for at most a millisecond: delivery
+continues at whatever rate the target really drains.  Only a run where
+*nothing* is accepted for ``STALL_SECONDS`` ends, with a message that says
+which queue refused and what to use instead.
 
 DIRECT is the default and the fastest path: it posts ``WM_*BUTTON*`` to the
 window under the cursor.  Posted messages skip the system input queue, but
@@ -81,32 +92,46 @@ TICK_SECONDS = 0.001
 MAX_BACKLOG_MS = 20.0
 # Every SendInput call has a fixed cost that dwarfs the per-event cost, so a
 # call carries a time budget instead of a single millisecond slot. At 6,000
-# CPS the 4 ms SENDINPUT budget is 24 clicks in one call (about 250 calls a
-# second); SYNC starts at one click a call and widens to a 2 ms budget as the
-# target keeps up. Shrinking the batch when a call is slow is what used to
-# collapse delivery to one click per call and cap the peak near 2,000 CPS.
+# CPS the 6 ms SENDINPUT budget is 36 clicks in one call (about 167 calls a
+# second); SYNC starts at one click a call and widens to a 3 ms budget (16
+# clicks) as the target keeps up. Shrinking the batch when a call is slow is
+# what used to collapse delivery to one click per call and cap the peak near
+# 2,000 CPS.
 MAX_CHUNK_CLICKS = 64
 MIN_CHUNK_CLICKS = 1
-SENDINPUT_BATCH_SECONDS = 0.004
-SYNC_BATCH_SECONDS = 0.002
-SYNC_MAX_CLICKS = 8
+SENDINPUT_BATCH_SECONDS = 0.006
+SYNC_BATCH_SECONDS = 0.003
+SYNC_MAX_CLICKS = 16
 # Posted window messages never wait for the system input queue, so direct
 # delivery can carry a wider batch per call. 64 clicks is about 10 ms at the
 # 6,000 CPS ceiling, which keeps STOP responsive while still cutting the
 # number of PostMessage loops per second by an order of magnitude.
 DIRECT_CHUNK_CLICKS = 64
 # Grow the batch only after this many clean calls, and only while the call
-# fitted inside the batch's own time budget.
-CHUNK_GROW_BURSTS = 8
+# fitted inside the batch's own time budget. Four, not eight: a batch that a
+# busy target narrowed is back at full size within a few milliseconds instead
+# of spending a hundred calls climbing back up.
+CHUNK_GROW_BURSTS = 4
 # Wait tiers, in seconds: above YIELD a timer sleeps, between SPIN and YIELD
 # the thread yields its timeslice back to the CPU, below SPIN it spins.
 # Sleeping down to 0.5 ms keeps the hot thread from burning a core between
 # four-millisecond batches; oversleep is harmless because credit repays it.
 YIELD_SECONDS = 0.0005
 SPIN_SECONDS = 0.00005
-# Keep retrying through a temporarily swamped input queue (about 0.4 s)
-# before abandoning a run, so a brief stall cannot cut a target short.
-MAX_CONSECUTIVE_FAILURES = 200
+# A target that is merely busy is not a failure. SendInput inserts only the
+# events that fit in the system input queue and PostMessage fails once a
+# window's 10,000-message queue is full, so both paths see shortfalls while
+# the target catches up: the click stays owed, the loop backs off and delivery
+# continues at whatever rate the target accepts. A run only ends when nothing
+# at all has been accepted for this long. Two seconds is long enough for a
+# target to load a level or answer a dialog, and short enough to report a
+# genuinely blocked target instead of clicking into the void.
+STALL_SECONDS = 2.0
+# Retry back-off while nothing is accepted: 0.1 ms doubling to 1 ms, so a
+# saturated queue is polled rather than spun and a freed slot is picked up
+# within a millisecond.
+BACKOFF_MIN_SECONDS = 0.0001
+BACKOFF_MAX_SECONDS = 0.001
 
 
 @dataclass(frozen=True)
@@ -483,8 +508,21 @@ class ClickEngine:
             # at the full time budget as well.
             chunk_limit = DIRECT_CHUNK_CLICKS
             chunk = sendinput_batch
+        # A batch can never be bigger than the credit bank. Credit is capped
+        # at backlog_cap, so waiting for a batch larger than that waits for
+        # clicks the cap refuses to accumulate: the loop sleeps forever and
+        # the run stops clicking while it still reports RUNNING. That is what
+        # froze low and medium rate runs a few seconds in, just after the
+        # batch had doubled its way past the cap (64 clicks against a 40-click
+        # bank at 2,000 CPS). Clamping the batch to the bank keeps every wait
+        # satisfiable - a slow target is paced, never deadlocked.
+        chunk_limit = max(
+            MIN_CHUNK_CLICKS, min(chunk_limit, int(backlog_cap))
+        )
+        chunk = min(chunk, chunk_limit)
         clean_bursts = 0
-        failures = 0
+        zero_streak = 0
+        stall_started = 0.0
         credit = 0.0
         start = time.perf_counter()
         last = start
@@ -573,15 +611,20 @@ class ClickEngine:
 
                 if click_array is not None:
                     sent, error = winapi.send_inputs(click_array, due * 2)
-                    accepted = sent >> 1
+                    if sent & 1:
+                        # A partial batch left the button held down. The
+                        # release completes that click, so it counts: rounding
+                        # it down sent the same click again and paid for a
+                        # second call just to undo it.
+                        winapi.send_button_release(config.button)
+                        accepted = (sent + 1) >> 1
+                    else:
+                        accepted = sent >> 1
                     if accepted > due:
                         accepted = due
-                    if sent & 1:
-                        # A partial batch can leave the button held down.
-                        winapi.send_button_release(config.button)
                     if accepted < due:
                         detail = (
-                            "Windows rejected injected input"
+                            "Windows is not accepting injected input"
                             + (f" (error {error})" if error else "")
                             + ". If the target is running elevated, run "
                             "ClickStorm as administrator."
@@ -618,14 +661,16 @@ class ClickEngine:
                             accepted = winapi.post_clicks(direct_target, due)
                             if accepted < due:
                                 detail = (
-                                    "The target window rejected some posted "
-                                    "clicks. Try SYNC delivery instead."
+                                    "The target window's message queue is "
+                                    "full - it is not processing posted "
+                                    "clicks fast enough. Use SENDINPUT or "
+                                    "SYNC delivery for this target."
                                 )
 
                 call_seconds = time.perf_counter() - call_start
 
-                # Only accepted clicks are paid for: anything Windows refused
-                # stays owed and is retried on the next turn.
+                # Only accepted clicks are paid for: anything the OS or the
+                # target left out stays owed and is retried immediately.
                 credit -= accepted
                 self._clicks_sent += accepted
                 self._input_events += accepted * 2
@@ -636,19 +681,17 @@ class ClickEngine:
                     self._catchup_clicks += accepted
 
                 if accepted >= due:
-                    failures = 0
-                    if detail:
-                        self._last_error = detail
-                    else:
-                        # A clean batch clears a message left by an earlier
-                        # rejection so the UI never shows a stale error.
-                        self._last_error = ""
+                    clean_bursts += 1
+                    zero_streak = 0
+                    stall_started = 0.0
+                    # A clean batch clears a message left by an earlier
+                    # shortfall so the UI never shows a stale error.
+                    self._last_error = ""
                     # Grow only while the call fitted inside the batch's own
                     # time budget: a call that took longer than the clicks it
                     # carried are worth must not grow, but it is never a
                     # reason to shrink (shrink-on-slow was the 2,000 CPS cap).
                     if call_seconds < max(0.001, chunk / cps):
-                        clean_bursts += 1
                         if (
                             clean_bursts >= CHUNK_GROW_BURSTS
                             and chunk < chunk_limit
@@ -657,31 +700,49 @@ class ClickEngine:
                             clean_bursts = 0
                     else:
                         clean_bursts = 0
-                else:
-                    failures += 1
-                    clean_bursts = 0
-                    # Windows or the target started refusing events: use the
-                    # narrowest call so the input queue can drain again.
-                    if chunk > MIN_CHUNK_CLICKS:
-                        chunk = max(MIN_CHUNK_CLICKS, chunk // 2)
-                    if detail:
-                        self._last_error = detail
-                    if accepted == 0:
-                        if failures >= MAX_CONSECUTIVE_FAILURES:
-                            reason = "error"
-                            message = (
-                                detail
-                                or "Windows rejected every injected click."
-                            )
-                            break
-                        # Nothing got through. Yield to the queue first and
-                        # only pause once a few calls in a row were refused:
-                        # a flat 1 ms sleep threw away most of the next slot
-                        # at high rates, while a 0.25 ms high-resolution wait
-                        # still keeps a refusal storm from pinning a core.
-                        winapi.switch_to_thread()
-                        if failures > 4:
-                            timer.sleep(0.00025)
+                    continue
+
+                clean_bursts = 0
+                if accepted > 0:
+                    # Partial call: the input queue (or the window's posted
+                    # message queue) only had room for this many clicks. Carry
+                    # exactly that many next time. Halving on every partial
+                    # call is what sawtoothed SENDINPUT down to a few hundred
+                    # CPS: it fell to one click per call and needed a run of
+                    # clean calls to climb back to a full batch. The remainder
+                    # is already owed, so the next turn sends it at once.
+                    chunk = max(MIN_CHUNK_CLICKS, min(chunk_limit, accepted))
+                    zero_streak = 0
+                    stall_started = 0.0
+                    self._last_error = ""
+                    continue
+
+                # Nothing got through at all: the queue is full, input is
+                # blocked, or the target stopped pumping messages.
+                zero_streak += 1
+                if chunk > MIN_CHUNK_CLICKS:
+                    chunk = max(MIN_CHUNK_CLICKS, chunk // 2)
+                message = detail or "Windows rejected every injected click."
+                self._last_error = message
+                now_call = time.perf_counter()
+                if not stall_started:
+                    stall_started = now_call
+                elif now_call - stall_started >= STALL_SECONDS:
+                    reason = "error"
+                    message = (
+                        f"{message} Nothing has been accepted for "
+                        f"{STALL_SECONDS:.0f} s, so the run was stopped."
+                    )
+                    break
+                # Back off instead of spinning: 0.1 ms doubling to 1 ms, so a
+                # freed queue slot is picked up within a millisecond while a
+                # saturated target is not polled thousands of times a second.
+                timer.sleep(
+                    min(
+                        BACKOFF_MAX_SECONDS,
+                        BACKOFF_MIN_SECONDS * (1 << min(zero_streak, 5)),
+                    )
+                )
 
         except Exception as exc:  # defensive: never silently kill the thread
             reason = "error"
