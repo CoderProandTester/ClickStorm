@@ -192,7 +192,12 @@ jobs:
           cargo build --release --manifest-path native/clickstorm-engine/Cargo.toml
           Copy-Item "native/clickstorm-engine/target/release/clickstorm_engine.dll" "native/clickstorm_engine.dll"
 
-      - name: Check delivered SENDINPUT and SYNC
+      - name: Check paced delivery without a display
+        env:
+          PYTHONPATH: .
+        run: python tools/backpressure_check.py
+
+      - name: Check delivered SENDINPUT and SYNC on both cores
         env:
           PYTHONPATH: .
         run: python tools/ci_delivery_check.py

@@ -152,9 +152,12 @@ Then check the behaviour you touched manually:
 - Test at low (10 CPS), normal (500-1,000 CPS) and high (4,000-6,000 CPS)
   rates; 6,000 is the cap.
 - For delivery or batching changes, run
-  `python tools/ci_delivery_check.py` on Windows. It loads the native core,
-  starts `tools/click_counter.py`, and verifies the delivered SENDINPUT rate,
-  SYNC click registration and a three-second DIRECT run at 2,000 CPS.
+  `python tools/ci_delivery_check.py` on Windows. It starts
+  `tools/click_counter.py` and verifies the delivered SENDINPUT rate and SYNC
+  click registration on both the Rust and the Python core, plus a two-second
+  DIRECT run at 2,000 CPS that must finish its count without stalling. The
+  counter does not act on posted messages on a CI desktop, so DIRECT pacing is
+  covered by `tools/backpressure_check.py` instead.
 - Verify follow-cursor and fixed-point modes.
 - Confirm the app keeps its icon, DPI scaling and saved window geometry.
 

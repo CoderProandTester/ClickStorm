@@ -233,6 +233,37 @@ impl Config {
     }
 }
 
+/// Batch plan for one session: `(starting chunk, largest chunk)` in clicks.
+///
+/// The largest chunk is clamped to the credit bank (`backlog_cap`): credit is
+/// capped there, so waiting for a bigger batch can never be satisfied and the
+/// run would stop clicking while still reporting RUNNING. That deadlock froze
+/// low and medium rate sessions a few seconds in. The Python core
+/// (`ClickEngine._run_session`) mirrors this plan.
+fn batch_plan(delivery: Delivery, cps: f64, backlog_cap: f64) -> (usize, usize) {
+    let sendinput_batch = ((cps * SENDINPUT_BATCH_SECONDS).round() as usize)
+        .clamp(MIN_CHUNK_CLICKS, MAX_CHUNK_CLICKS);
+    let (chunk, limit) = match delivery {
+        Delivery::Sync => (
+            MIN_CHUNK_CLICKS,
+            ((cps * SYNC_BATCH_SECONDS).round() as usize)
+                .clamp(MIN_CHUNK_CLICKS, SYNC_MAX_CLICKS),
+        ),
+        // Opens at half the budget and doubles after a few clean calls: the
+        // full 72-event call is answered with a shortfall while a target's
+        // input queue is still filling.
+        Delivery::SendInput => (
+            (sendinput_batch / 2).max(MIN_CHUNK_CLICKS),
+            sendinput_batch,
+        ),
+        Delivery::Direct => (sendinput_batch, DIRECT_CHUNK_CLICKS),
+    };
+    let limit = limit
+        .max(MIN_CHUNK_CLICKS)
+        .min((backlog_cap as usize).max(MIN_CHUNK_CLICKS));
+    (chunk.clamp(MIN_CHUNK_CLICKS, limit), limit)
+}
+
 // ---------------------------------------------------------------------------
 // Engine state
 // ---------------------------------------------------------------------------
@@ -753,36 +784,10 @@ mod platform {
         }
 
         let use_send_input = delivery != Delivery::Direct;
-        let sendinput_batch = ((cfg.cps * SENDINPUT_BATCH_SECONDS).round() as usize)
-            .clamp(MIN_CHUNK_CLICKS, MAX_CHUNK_CLICKS);
-        let (mut chunk, mut chunk_limit) = match delivery {
-            Delivery::Sync => (
-                MIN_CHUNK_CLICKS,
-                ((cfg.cps * SYNC_BATCH_SECONDS).round() as usize)
-                    .clamp(MIN_CHUNK_CLICKS, SYNC_MAX_CLICKS),
-            ),
-            // Opens at half the budget and doubles after a few clean calls:
-            // the full 72-event call is answered with a shortfall while a
-            // target's input queue is still filling.
-            Delivery::SendInput => (
-                (sendinput_batch / 2).max(MIN_CHUNK_CLICKS),
-                sendinput_batch,
-            ),
-            Delivery::Direct => (sendinput_batch, DIRECT_CHUNK_CLICKS),
-        };
 
         let cps = cfg.cps;
         let backlog_cap = (cps / 1000.0 * MAX_BACKLOG_MS).max(1.0);
-        // A batch can never be bigger than the credit bank. Credit is capped
-        // at backlog_cap, so waiting for a larger batch waits for clicks the
-        // cap refuses to accumulate: the loop sleeps forever while it still
-        // reports RUNNING. That is what froze low and medium rate runs a few
-        // seconds in, after the batch had doubled past the cap (64 clicks
-        // against a 40-click bank at 2,000 CPS).
-        chunk_limit = chunk_limit
-            .max(MIN_CHUNK_CLICKS)
-            .min((backlog_cap as usize).max(MIN_CHUNK_CLICKS));
-        chunk = chunk.clamp(MIN_CHUNK_CLICKS, chunk_limit);
+        let (mut chunk, chunk_limit) = batch_plan(delivery, cps, backlog_cap);
         let mut credit = 0.0_f64;
         let mut rng: u64 = 0x9E37_79B9_7F4A_7C15 ^ now_ns();
         let mut zero_streak = 0_u32;
@@ -1245,6 +1250,35 @@ mod tests {
         // The Python ctypes mirror asserts the same numbers.
         assert_eq!(std::mem::size_of::<CsConfig>(), 80);
         assert_eq!(std::mem::size_of::<CsStats>(), 112);
+    }
+
+    #[test]
+    fn every_batch_fits_the_credit_bank() {
+        // Waiting for a batch larger than the bank can never be satisfied,
+        // which is what froze low and medium rate runs. No plan may do that.
+        for delivery in [Delivery::Direct, Delivery::SendInput, Delivery::Sync] {
+            for cps in [1.0, 10.0, 100.0, 500.0, 1_000.0, 2_000.0, 5_000.0, 6_000.0] {
+                let cap = (cps / 1000.0 * MAX_BACKLOG_MS).max(1.0);
+                let (chunk, limit) = batch_plan(delivery, cps, cap);
+                assert!(chunk >= MIN_CHUNK_CLICKS);
+                assert!(
+                    chunk <= limit,
+                    "{delivery:?} at {cps}: chunk {chunk} exceeds limit {limit}"
+                );
+                assert!(
+                    (limit as f64) <= cap.max(1.0),
+                    "{delivery:?} at {cps}: limit {limit} exceeds the {cap} click bank"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sendinput_ramps_to_its_full_budget() {
+        let cap = 6_000.0 / 1000.0 * MAX_BACKLOG_MS;
+        let (chunk, limit) = batch_plan(Delivery::SendInput, 6_000.0, cap);
+        assert_eq!(limit, 36);
+        assert_eq!(chunk, 18);
     }
 
     #[test]
